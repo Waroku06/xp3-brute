@@ -1,0 +1,42 @@
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[project]
+name = "xp3-brute"
+version = "0.3.7"
+description = "Cross-platform native Python SDK for KiriKiri XP3 archives"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "xp3-brute contributors" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3 :: 9",
+  "Programming Language :: Python :: 3 :: 10",
+  "Programming Language :: Python :: 3 :: 11",
+  "Programming Language :: Python :: 3 :: 12",
+  "Programming Language :: Python :: 3 :: 13",
+  "Programming Language :: Rust",
+  "Topic :: Software Development :: Libraries",
+]
+keywords = ["xp3", "kirikiri", "visual-novel", "archive"]
+
+[project.urls]
+Homepage = "https://github.com/xmoezzz/xp3-brute"
+Repository = "https://github.com/xmoezzz/xp3-brute"
+Issues = "https://github.com/xmoezzz/xp3-brute/issues"
+
+[tool.maturin]
+manifest-path = "../../Cargo.toml"
+bindings = "pyo3"
+features = ["python"]
+module-name = "xp3_brute"
+python-source = "python"
+strip = true

@@ -31,6 +31,7 @@ This repository is a Cargo workspace:
 ```text
 xp3-brute/                 # shared core library and xp3brute CLI
 apps/xp3-desktop/          # native eframe/egui desktop app
+packages/python/           # publishable PyPI SDK and wheel metadata
 ```
 
 The CLI remains the default workspace member, so existing `cargo build` and
@@ -69,35 +70,43 @@ cargo build --release --no-default-features --features magic-sniff
 
 ### Python / CPython bindings
 
-The project ships a native CPython extension rather than a subprocess wrapper.
-It exposes archive inspection and reconstruction, PBD/TLG/AMV conversion,
-manifest rebuild/pack/round-trip verification, filter detection, and repeating
-XOR recovery. Build/install it with [maturin](https://www.maturin.rs/):
+The publishable SDK lives in [`packages/python`](packages/python). It ships a
+Python API layer over a native CPython extension, and exposes archive
+inspection/reconstruction, PBD/TLG/AMV conversion, manifest rebuild/pack,
+round-trip verification, filter detection, and repeating-XOR recovery.
 
 ```bash
-python -m pip install maturin
-maturin develop --release --features python
+pip install xp3-brute
 ```
 
-The extension targets Python's stable ABI (Python 3.9+). Structured reports
-are returned as JSON strings, ready for `json.loads` or direct logging.
+Source development:
+
+```bash
+cd packages/python
+python -m pip install 'maturin>=1.12,<2'
+maturin develop --release
+```
+
+Wheels target the CPython stable ABI (Python 3.9+) and are built in CI for
+manylinux2014 x86_64, macOS arm64, and Windows x86_64. Structured reports are
+returned as JSON strings, ready for `json.loads` or direct logging.
 
 ```python
-import json
-import xp3_brute
+from xp3_brute import Xp3
 
-archive = xp3_brute.Archive("data.xp3")
-print(json.loads(archive.summary_json()))
+archive = Xp3.open_archive("data.xp3")
+print(Xp3.inspect("data.xp3"))
 for entry in archive.entries():
     print(entry.index, entry.name, entry.original_size)
 
 storage_bytes = archive.reconstruct_entry(0)
-report = json.loads(xp3_brute.detect_filter_json("game.exe"))
+report = Xp3.detect_filter("game.exe")
 print(report["backend"], report["confidence"])
 ```
 
-Rust consumers continue to use the same frontend-neutral public API directly;
-enabling the `python` Cargo feature only adds the extension module.
+Release publishing uses PyPI trusted publishing and the wheel matrix in
+[`python-publish.yml`](.github/workflows/python-publish.yml). Rust consumers
+continue to use the same frontend-neutral public API directly.
 
 ---
 
