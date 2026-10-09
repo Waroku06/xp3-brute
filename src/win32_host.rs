@@ -516,6 +516,10 @@ fn unknown_stack_bytes(name: &str) -> u16 {
         | "GetEnvironmentStringsA"
         | "GetEnvironmentStringsW"
         | "GetCommandLineA"
+        | "GetCommandLineW"
+        | "GetCurrentThread"
+        | "SwitchToThread"
+        | "GetTickCount64"
         | "GetVersion"
         | "GetLastError"
         | "GetACP"
@@ -540,6 +544,33 @@ fn unknown_stack_bytes(name: &str) -> u16 {
         | "FreeEnvironmentStringsA"
         | "FreeEnvironmentStringsW"
         | "GetVersionExA"
+        | "GetVersionExW"
+        | "UnhandledExceptionFilter"
+        | "QueryPerformanceFrequency"
+        | "GetSystemTimePreciseAsFileTime"
+        | "GetSystemInfo"
+        | "GlobalMemoryStatus"
+        | "GlobalMemoryStatusEx"
+        | "HeapLock"
+        | "HeapUnlock"
+        | "OutputDebugStringA"
+        | "OutputDebugStringW"
+        | "LocalFree"
+        | "GlobalFree"
+        | "GlobalLock"
+        | "LocalLock"
+        | "GlobalUnlock"
+        | "LocalUnlock"
+        | "InitializeSListHead"
+        | "InterlockedFlushSList"
+        | "InterlockedPopEntrySList"
+        | "lstrlenA"
+        | "lstrlenW"
+        | "GetFileAttributesA"
+        | "GetFileAttributesW"
+        | "SetEvent"
+        | "ResetEvent"
+        | "ReleaseMutex"
         | "GetSystemTimeAsFileTime"
         | "IsProcessorFeaturePresent"
         | "EncodePointer"
@@ -559,8 +590,31 @@ fn unknown_stack_bytes(name: &str) -> u16 {
         | "lstrcmpiA"
         | "GetSystemDirectoryA"
         | "FindFirstFileW"
-        | "FindNextFileW" => 8,
-        "GetEnvironmentVariableA" | "FlushInstructionCache" => 12,
+        | "FindNextFileW"
+        | "LocalAlloc"
+        | "GlobalAlloc"
+        | "InterlockedExchange"
+        | "InterlockedExchangeAdd"
+        | "InterlockedPushEntrySList"
+        | "GetConsoleMode"
+        | "WaitForSingleObject"
+        | "GetUserDefaultLocaleName"
+        | "GetSystemDefaultLocaleName" => 8,
+        "GetEnvironmentVariableA"
+        | "GetEnvironmentVariableW"
+        | "FlushInstructionCache"
+        | "GetModuleHandleExA"
+        | "GetModuleHandleExW"
+        | "InterlockedCompareExchange"
+        | "WaitForSingleObjectEx"
+        | "CreateMutexA"
+        | "CreateMutexW"
+        | "HeapValidate" => 12,
+        "CreateEventA" | "CreateEventW" | "CreateSemaphoreA" | "CreateSemaphoreW"
+        | "HeapSetInformation" => 16,
+        "ReleaseSemaphore" => 12,
+        "WriteConsoleA" | "WriteConsoleW" | "SetFilePointerEx" => 20,
+        "CreateFileW" => 28,
         "GetLocaleInfoA" | "GetLocaleInfoW" | "RtlUnwind" | "RaiseException" | "SetFilePointer"
         | "GetStringTypeW" => 16,
         "ReadFile" | "WriteFile" | "GetStringTypeA" => 20,
@@ -622,5 +676,34 @@ mod tests {
         assert!(host.tls_free(slot));
         assert!(!host.tls_free(slot));
         assert_eq!(host.last_error(), ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn modern_crt_startup_apis_pop_their_stdcall_arguments() {
+        // A wrong stdcall cleanup size silently corrupts the guest stack, so pin
+        // the sizes of the APIs that CRT startup code commonly imports.
+        for (name, bytes) in [
+            ("GetCommandLineW", 0u16),
+            ("UnhandledExceptionFilter", 4),
+            ("GetVersionExW", 4),
+            ("GetModuleHandleExW", 12),
+            ("QueryPerformanceFrequency", 4),
+            ("SetFilePointerEx", 20),
+            ("CreateFileW", 28),
+            ("WriteConsoleW", 20),
+            ("GetConsoleMode", 8),
+            ("LocalAlloc", 8),
+            ("InterlockedCompareExchange", 12),
+            ("InterlockedPushEntrySList", 8),
+            ("WaitForSingleObject", 8),
+            ("HeapValidate", 12),
+            ("HeapSetInformation", 16),
+        ] {
+            assert_eq!(
+                Win32Api::from_name(name).stack_bytes(),
+                bytes,
+                "{name}"
+            );
+        }
     }
 }

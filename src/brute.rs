@@ -109,12 +109,15 @@ pub fn build_key_space(
         return None;
     }
     let used_slots = candidate.period.min(ciphertext.len());
-    let mut allowed = vec![[true; 256]; used_slots];
+    // Only slots with a known key byte or a plaintext constraint need a mask;
+    // every other slot starts from the same 256-entry template.
+    let mut allowed: Vec<Option<Box<[bool; 256]>>> = vec![None; used_slots];
 
     for slot in 0..used_slots {
         if let Some(value) = candidate.key.get(slot).copied().flatten() {
-            allowed[slot].fill(false);
-            allowed[slot][value as usize] = true;
+            let mut mask = Box::new([false; 256]);
+            mask[value as usize] = true;
+            allowed[slot] = Some(mask);
         }
     }
 
@@ -133,33 +136,46 @@ pub fn build_key_space(
         for &plain in &constraint.allowed {
             permitted_keys[(ciphertext[offset] ^ plain) as usize] = true;
         }
+        let mask = allowed[slot].get_or_insert_with(|| Box::new([true; 256]));
         for value in 0..256 {
-            allowed[slot][value] &= permitted_keys[value];
+            mask[value] &= permitted_keys[value];
         }
     }
+
+    let template: Vec<KeyByteCandidate> = (0..=255u8)
+        .map(|value| KeyByteCandidate { value, score: 0.0 })
+        .collect();
 
     let mut slots = Vec::with_capacity(used_slots);
     let mut ambiguous_slots = 0usize;
     let mut entropy_bits = 0.0f64;
     let mut combinations = Some(1u128);
+    let full_entropy = 8.0f64;
 
-    for (slot, bits) in allowed.into_iter().enumerate() {
-        let candidates: Vec<KeyByteCandidate> = bits
-            .iter()
-            .enumerate()
-            .filter_map(|(value, &yes)| {
-                yes.then_some(KeyByteCandidate {
-                    value: value as u8,
-                    score: 0.0,
+    for (slot, mask) in allowed.into_iter().enumerate() {
+        let candidates: Vec<KeyByteCandidate> = match mask {
+            None => template.clone(),
+            Some(bits) => bits
+                .iter()
+                .enumerate()
+                .filter_map(|(value, &yes)| {
+                    yes.then_some(KeyByteCandidate {
+                        value: value as u8,
+                        score: 0.0,
+                    })
                 })
-            })
-            .collect();
+                .collect(),
+        };
         if candidates.is_empty() {
             return None;
         }
         if candidates.len() > 1 {
             ambiguous_slots += 1;
-            entropy_bits += (candidates.len() as f64).log2();
+            entropy_bits += if candidates.len() == 256 {
+                full_entropy
+            } else {
+                (candidates.len() as f64).log2()
+            };
         }
         combinations = combinations.and_then(|total| total.checked_mul(candidates.len() as u128));
         slots.push(KeySlotCandidates { slot, candidates });
@@ -193,14 +209,14 @@ fn fwht(values: &mut [f64; 256]) {
     }
 }
 
-fn xor_correlation(histogram: &[u64; 256], log_probability: &[f64; 256]) -> [f64; 256] {
+/// `right` is `fwht(log_probability)`, computed once per scoring call because it
+/// is identical for every slot.
+fn xor_correlation(histogram: &[u64; 256], right: &[f64; 256]) -> [f64; 256] {
     let mut left = [0.0f64; 256];
-    let mut right = *log_probability;
     for i in 0..256 {
         left[i] = histogram[i] as f64;
     }
     fwht(&mut left);
-    fwht(&mut right);
     for i in 0..256 {
         left[i] *= right[i];
     }
@@ -331,23 +347,40 @@ pub fn refine_key_space_with_histogram_compute(
         note_cpu_slot_job();
     }
 
+    let mut log_probability_fwht = log_probability;
+    fwht(&mut log_probability_fwht);
+
     let mut reduced = 0usize;
     let mut singleton = 0usize;
+    // Slots left with more than top_k+1 candidates only have their leading
+    // top_k+1 entries ordered so far.
+    let mut unsorted_tails: Vec<usize> = Vec::new();
     for (job_index, job) in jobs.iter().enumerate() {
         let scores = if let Some(rows) = gpu_scores.as_ref() {
             rows[job_index]
         } else {
-            xor_correlation(&job.hist_u64, &log_probability)
+            xor_correlation(&job.hist_u64, &log_probability_fwht)
         };
         let slot = &mut space.slots[job.space_index];
         for key_candidate in &mut slot.candidates {
             key_candidate.score = scores[key_candidate.value as usize];
         }
-        slot.candidates.sort_by(|a, b| {
+        let by_score = |a: &KeyByteCandidate, b: &KeyByteCandidate| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.value.cmp(&b.value))
-        });
+        };
+        // Pruning only inspects the best, second and (top_k)-th candidates, so
+        // order just the leading top_k+1 first. The tail is ordered later only
+        // when no truncation happens and the full order must be preserved.
+        let prefix = (top_k + 1).min(slot.candidates.len());
+        if prefix < slot.candidates.len() {
+            slot.candidates.select_nth_unstable_by(prefix - 1, by_score);
+        }
+        slot.candidates[..prefix].sort_unstable_by(by_score);
+        if prefix < slot.candidates.len() {
+            unsorted_tails.push(job.space_index);
+        }
 
         if slot.candidates.len() > 1 {
             let best = slot.candidates[0].score;
@@ -365,6 +398,7 @@ pub fn refine_key_space_with_histogram_compute(
             if best - first_excluded >= min_log_likelihood_gap {
                 slot.candidates.truncate(top_k);
                 reduced += 1;
+                continue;
             }
         }
     }
@@ -380,6 +414,21 @@ pub fn refine_key_space_with_histogram_compute(
         space.combinations = space
             .combinations
             .and_then(|total| total.checked_mul(slot.candidates.len() as u128));
+    }
+
+    // Candidate order only matters to an exhaustive/MITM search, which cannot
+    // run beyond 2^40 total combinations (2^20 per MITM half). Skip the full
+    // ordering of big unresolved slots when the space is hopeless anyway.
+    if space.combinations.is_some_and(|total| total <= 1u128 << 40) {
+        for index in unsorted_tails {
+            let slot = &mut space.slots[index];
+            let prefix = (top_k + 1).min(slot.candidates.len());
+            slot.candidates[prefix..].sort_unstable_by(|a, b| {
+                b.score
+                    .total_cmp(&a.score)
+                    .then_with(|| a.value.cmp(&b.value))
+            });
+        }
     }
     Ok((reduced, singleton))
 }

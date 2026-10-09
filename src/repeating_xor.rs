@@ -93,13 +93,25 @@ fn evaluate_observations(
     file_lengths: &[usize],
     period: usize,
 ) -> PeriodCandidate {
-    // Observations are normally sparse. Do not allocate a 256-candidate table
-    // for every key slot: bucket only slots that actually receive evidence.
-    let mut by_slot: Vec<Vec<(u8, f64)>> = (0..period).map(|_| Vec::new()).collect();
+    // Counting-sort the observations by key slot: two flat allocations per
+    // period instead of one Vec per slot.
+    let mut starts = vec![0u32; period + 1];
+    for observation in observations {
+        starts[observation.offset as usize % period + 1] += 1;
+    }
+    for slot in 0..period {
+        starts[slot + 1] += starts[slot];
+    }
+    let mut cursor = starts.clone();
+    let mut flat = vec![(0u8, 0.0f64); observations.len()];
     for observation in observations {
         let slot = observation.offset as usize % period;
-        by_slot[slot].push((observation.key_byte, observation.weight));
+        flat[cursor[slot] as usize] = (observation.key_byte, observation.weight);
+        cursor[slot] += 1;
     }
+    let by_slot: Vec<&[(u8, f64)]> = (0..period)
+        .map(|slot| &flat[starts[slot] as usize..starts[slot + 1] as usize])
+        .collect();
 
     let mut out = PeriodCandidate {
         period,
@@ -113,7 +125,7 @@ fn evaluate_observations(
         key: vec![None; period],
     };
 
-    for (slot, slot_observations) in by_slot.iter().enumerate() {
+    for (slot, &slot_observations) in by_slot.iter().enumerate() {
         if slot_observations.is_empty() {
             continue;
         }

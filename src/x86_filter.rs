@@ -3426,6 +3426,16 @@ fn emulate_kernel_api(uc: &mut Unicorn<'_, EmuState>, api: &Win32Api, name: &str
     let arg = |uc: &Unicorn<'_, EmuState>, n: u64| -> u32 {
         read_u32_uc(uc, esp + 4 + n * 4).unwrap_or(0)
     };
+    if uc.get_data().trace_code {
+        eprintln!(
+            "[x86-api] {name}(0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}) ret=0x{:x}",
+            arg(uc, 0),
+            arg(uc, 1),
+            arg(uc, 2),
+            arg(uc, 3),
+            read_u32_uc(uc, esp).unwrap_or(0),
+        );
+    }
     match api {
         Win32Api::VirtualAlloc => {
             let requested_addr = arg(uc, 0) as u64;
@@ -3738,7 +3748,8 @@ fn emulate_win32_compat_api(uc: &mut Unicorn<'_, EmuState>, name: &str, esp: u64
         let _ = uc.reg_write(RegisterX86::EAX, value);
     };
     match name {
-        "GetVersion" => set_eax(uc, 0x0000_0005),
+        // Windows XP SP3: major 5, minor 1, build 2600 (NT, so bit 31 is clear).
+        "GetVersion" => set_eax(uc, (2600u64 << 16) | (1 << 8) | 5),
         "GetLastError" => set_eax(uc, uc.get_data().win32.last_error() as u64),
         "SetLastError" => {
             let error = arg(uc, 0);
@@ -3900,16 +3911,255 @@ fn emulate_win32_compat_api(uc: &mut Unicorn<'_, EmuState>, name: &str, esp: u64
             let ok = ptr != 0 && uc.mem_write(ptr, &info).is_ok();
             set_eax(uc, u64::from(ok));
         }
-        "GetVersionExA" => {
+        "GetVersionExA" | "GetVersionExW" => {
+            // OSVERSIONINFO(EX)A/W: size, major, minor, build, platform, csd[128|128 wchar].
+            // dwPlatformId must be VER_PLATFORM_WIN32_NT (2); the MSVC CRT treats 0 as
+            // an invalid platform and aborts startup.
             let ptr = arg(uc, 0) as u64;
-            let size = read_u32_uc(uc, ptr).unwrap_or(0).min(148) as usize;
-            let mut info = [0u8; 148];
+            let wide = name.ends_with('W');
+            let full = if wide { 276 } else { 148 };
+            let size = read_u32_uc(uc, ptr).unwrap_or(0) as usize;
+            let mut info = vec![0u8; full.max(size.min(0x400))];
             info[..4].copy_from_slice(&(size as u32).to_le_bytes());
             info[4..8].copy_from_slice(&5u32.to_le_bytes());
             info[8..12].copy_from_slice(&1u32.to_le_bytes());
             info[12..16].copy_from_slice(&2600u32.to_le_bytes());
-            let ok = ptr != 0 && size >= 20 && uc.mem_write(ptr, &info[..size]).is_ok();
+            info[16..20].copy_from_slice(&2u32.to_le_bytes());
+            let ok = ptr != 0 && size >= 20 && uc.mem_write(ptr, &info[..size.min(info.len())]).is_ok();
             set_eax(uc, u64::from(ok));
+        }
+        "GetCommandLineW" => {
+            let bytes: Vec<u8> = "C:\\game\\game.exe\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let ptr = uc.get_data_mut().allocate(bytes.len()).unwrap_or(0);
+            if ptr != 0 {
+                let _ = uc.mem_write(ptr, &bytes);
+            }
+            set_eax(uc, ptr);
+        }
+        // No guest exception machinery runs here: EXCEPTION_CONTINUE_SEARCH.
+        "UnhandledExceptionFilter" => set_eax(uc, 0),
+        "GetModuleHandleExW" | "GetModuleHandleExA" => {
+            let flags = arg(uc, 0);
+            let name_ptr = arg(uc, 1) as u64;
+            let out = arg(uc, 2) as u64;
+            const FROM_ADDRESS: u32 = 0x4;
+            let handle = if flags & FROM_ADDRESS != 0 || name_ptr == 0 {
+                uc.get_data().module_image_base
+            } else {
+                let module = if name.ends_with('W') {
+                    read_utf16_string_uc(uc, name_ptr, 1024)
+                } else {
+                    read_c_string_uc(uc, name_ptr, 1024)
+                };
+                module
+                    .as_deref()
+                    .and_then(|module| uc.get_data().win32.module_handle(module))
+                    .unwrap_or(0)
+            };
+            if handle != 0 && out != 0 {
+                let _ = write_u32_uc(uc, out, handle);
+            }
+            if handle == 0 {
+                uc.get_data_mut().win32.set_last_error(ERROR_MOD_NOT_FOUND);
+            }
+            set_eax(uc, u64::from(handle != 0));
+        }
+        "QueryPerformanceFrequency" => {
+            let ptr = arg(uc, 0) as u64;
+            let ok = ptr != 0 && write_u64_uc(uc, ptr, 10_000_000).is_ok();
+            set_eax(uc, u64::from(ok));
+        }
+        "GetSystemTimePreciseAsFileTime" => {
+            let ptr = arg(uc, 0) as u64;
+            if ptr != 0 {
+                let _ = write_u64_uc(uc, ptr, 0x01d9_0000_1234_5678);
+            }
+            set_eax(uc, 0);
+        }
+        "GetTickCount64" => {
+            let _ = uc.reg_write(RegisterX86::EDX, 0);
+            set_eax(uc, 0x1234_5678);
+        }
+        "GetSystemInfo" => {
+            let ptr = arg(uc, 0) as u64;
+            let mut info = [0u8; 36];
+            let fields: [u32; 9] = [
+                0,           // wProcessorArchitecture (x86) | reserved
+                0x1000,      // dwPageSize
+                0x0001_0000, // lpMinimumApplicationAddress
+                0x7ffe_ffff, // lpMaximumApplicationAddress
+                1,           // dwActiveProcessorMask
+                1,           // dwNumberOfProcessors
+                586,         // dwProcessorType
+                0x1_0000,    // dwAllocationGranularity
+                0x0006_0f01, // wProcessorLevel | wProcessorRevision
+            ];
+            for (i, field) in fields.iter().enumerate() {
+                info[i * 4..i * 4 + 4].copy_from_slice(&field.to_le_bytes());
+            }
+            if ptr != 0 {
+                let _ = uc.mem_write(ptr, &info);
+            }
+            set_eax(uc, 0);
+        }
+        "GlobalMemoryStatus" | "GlobalMemoryStatusEx" => {
+            // Fixed 512 MiB physical / 2 GiB virtual machine.
+            let ptr = arg(uc, 0) as u64;
+            let ok = if name.ends_with("Ex") {
+                let mut info = [0u8; 64];
+                info[..4].copy_from_slice(&64u32.to_le_bytes());
+                for (offset, value) in [(8usize, 512u64 << 20), (16, 256 << 20), (24, 1 << 30), (32, 512 << 20), (40, 2u64 << 30), (48, 2u64 << 30)] {
+                    info[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                ptr != 0 && uc.mem_write(ptr, &info).is_ok()
+            } else {
+                let mut info = [0u8; 32];
+                info[..4].copy_from_slice(&32u32.to_le_bytes());
+                for (i, value) in [0u32, 512 << 20, 256 << 20, 1 << 30, 512 << 20, 2u32 << 30, 2u32 << 30]
+                    .iter()
+                    .enumerate()
+                {
+                    info[4 + i * 4..8 + i * 4].copy_from_slice(&value.to_le_bytes());
+                }
+                if ptr != 0 {
+                    let _ = uc.mem_write(ptr, &info);
+                }
+                true
+            };
+            set_eax(uc, u64::from(ok));
+        }
+        "HeapValidate" | "HeapSetInformation" | "HeapLock" | "HeapUnlock" => set_eax(uc, 1),
+        "GetCurrentThread" => set_eax(uc, 0xffff_fffe),
+        "SwitchToThread" => set_eax(uc, 0),
+        "GetEnvironmentVariableW" => set_eax(uc, 0),
+        "GetFileAttributesA" | "GetFileAttributesW" => {
+            uc.get_data_mut().win32.set_last_error(2);
+            set_eax(uc, 0xffff_ffff);
+        }
+        // File and console I/O is never available to the guest.
+        "CreateFileW" => {
+            uc.get_data_mut().win32.set_last_error(2);
+            set_eax(uc, 0xffff_ffff);
+        }
+        "SetFilePointerEx" => {
+            uc.get_data_mut().win32.set_last_error(6);
+            set_eax(uc, 0);
+        }
+        "GetConsoleMode" => {
+            uc.get_data_mut().win32.set_last_error(6);
+            set_eax(uc, 0);
+        }
+        "WriteConsoleA" | "WriteConsoleW" => {
+            // Report everything written so CRT error paths terminate cleanly.
+            let chars = arg(uc, 2);
+            let written_ptr = arg(uc, 3) as u64;
+            if written_ptr != 0 {
+                let _ = write_u32_uc(uc, written_ptr, chars);
+            }
+            set_eax(uc, 1);
+        }
+        "OutputDebugStringA" | "OutputDebugStringW" => set_eax(uc, 0),
+        "LocalAlloc" | "GlobalAlloc" => {
+            let flags = arg(uc, 0);
+            let size = arg(uc, 1) as usize;
+            let ptr = uc.get_data_mut().allocate(size).unwrap_or(0);
+            // LMEM_ZEROINIT / GMEM_ZEROINIT share bit 0x40.
+            if ptr != 0 && flags & 0x40 != 0 && size != 0 {
+                let _ = uc.mem_write(ptr, &vec![0u8; size]);
+            }
+            set_eax(uc, ptr);
+        }
+        "LocalFree" | "GlobalFree" => {
+            let ptr = arg(uc, 0) as u64;
+            if ptr != 0 {
+                uc.get_data_mut().free_allocation(ptr);
+            }
+            set_eax(uc, 0);
+        }
+        // Fixed (non-movable) memory: the handle is the pointer.
+        "GlobalLock" | "LocalLock" => set_eax(uc, arg(uc, 0) as u64),
+        "GlobalUnlock" | "LocalUnlock" => set_eax(uc, 0),
+        "InterlockedExchange" => {
+            let ptr = arg(uc, 0) as u64;
+            let value = arg(uc, 1);
+            let old = read_u32_uc(uc, ptr).unwrap_or(0);
+            let _ = write_u32_uc(uc, ptr, value);
+            set_eax(uc, old as u64);
+        }
+        "InterlockedExchangeAdd" => {
+            let ptr = arg(uc, 0) as u64;
+            let addend = arg(uc, 1);
+            let old = read_u32_uc(uc, ptr).unwrap_or(0);
+            let _ = write_u32_uc(uc, ptr, old.wrapping_add(addend));
+            set_eax(uc, old as u64);
+        }
+        "InterlockedCompareExchange" => {
+            let ptr = arg(uc, 0) as u64;
+            let exchange = arg(uc, 1);
+            let comparand = arg(uc, 2);
+            let old = read_u32_uc(uc, ptr).unwrap_or(0);
+            if old == comparand {
+                let _ = write_u32_uc(uc, ptr, exchange);
+            }
+            set_eax(uc, old as u64);
+        }
+        // SLIST_HEADER: first word is the head pointer, the rest depth/sequence.
+        "InitializeSListHead" => {
+            let head = arg(uc, 0) as u64;
+            let _ = write_u64_uc(uc, head, 0);
+            set_eax(uc, 0);
+        }
+        "InterlockedPushEntrySList" => {
+            let head = arg(uc, 0) as u64;
+            let entry = arg(uc, 1) as u64;
+            let old = read_u32_uc(uc, head).unwrap_or(0);
+            let _ = write_u32_uc(uc, entry, old);
+            let _ = write_u32_uc(uc, head, entry as u32);
+            set_eax(uc, old as u64);
+        }
+        "InterlockedPopEntrySList" => {
+            let head = arg(uc, 0) as u64;
+            let first = read_u32_uc(uc, head).unwrap_or(0);
+            if first != 0 {
+                let next = read_u32_uc(uc, first as u64).unwrap_or(0);
+                let _ = write_u32_uc(uc, head, next);
+            }
+            set_eax(uc, first as u64);
+        }
+        "InterlockedFlushSList" => {
+            let head = arg(uc, 0) as u64;
+            let first = read_u32_uc(uc, head).unwrap_or(0);
+            let _ = write_u32_uc(uc, head, 0);
+            set_eax(uc, first as u64);
+        }
+        "lstrlenA" => {
+            let len = read_c_string_uc(uc, arg(uc, 0) as u64, 1 << 16).map_or(0, |s| s.len());
+            set_eax(uc, len as u64);
+        }
+        "lstrlenW" => {
+            let len = read_utf16_string_uc(uc, arg(uc, 0) as u64, 1 << 16)
+                .map_or(0, |s| s.encode_utf16().count());
+            set_eax(uc, len as u64);
+        }
+        // Single-threaded guest: every wait is already satisfied, and
+        // synchronisation objects are opaque handles.
+        "WaitForSingleObject" | "WaitForSingleObjectEx" => set_eax(uc, 0),
+        "CreateEventA" | "CreateEventW" | "CreateMutexA" | "CreateMutexW" | "CreateSemaphoreA"
+        | "CreateSemaphoreW" => set_eax(uc, 0x0000_7a00),
+        "SetEvent" | "ResetEvent" | "ReleaseMutex" | "ReleaseSemaphore" => set_eax(uc, 1),
+        "GetUserDefaultLocaleName" | "GetSystemDefaultLocaleName" => {
+            let output = arg(uc, 0) as u64;
+            let capacity = arg(uc, 1) as usize;
+            let text: Vec<u8> = "ja-JP\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+            if output != 0 && capacity >= text.len() / 2 && uc.mem_write(output, &text).is_ok() {
+                set_eax(uc, (text.len() / 2) as u64);
+            } else {
+                uc.get_data_mut().win32.set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                set_eax(uc, 0);
+            }
         }
         "GetCPInfo" => {
             let code_page = uc.get_data().win32.profile.resolve_code_page(arg(uc, 0));

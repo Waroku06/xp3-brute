@@ -74,6 +74,11 @@ use xp3_brute::{
     PSB_ROOT_JSON_SCHEMA,
 };
 
+thread_local! {
+    static X86_WORKER_RUNTIME: std::cell::RefCell<Option<(String, X86Xp3FilterRuntime)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn apply_filter_session(
     module: &Path,
     file_offset: u64,
@@ -9146,6 +9151,19 @@ fn unpack(
     // Unicorn is not shared between Rayon workers. Keep one initialized runtime
     // alive across all bounded batches instead of re-running DllMain/V2Link for
     // every entry. Known pure-Rust filters still use the normal parallel path.
+    let x86_worker_pool = if validated_x86_filter.is_some() {
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|i| format!("x86-filter-{i}"))
+            .build()
+            .ok()
+    } else {
+        None
+    };
     let mut persistent_x86_runtime = validated_x86_filter
         .as_ref()
         .map(|selection| {
@@ -9163,9 +9181,13 @@ fn unpack(
         .transpose()?;
     if let Some(selection) = validated_x86_filter.as_ref() {
         eprintln!(
-            "[x86-filter    ] execution=persistent-emulator module={} callback=0x{:08x} batching=bounded parallelism=1",
+            "[x86-filter    ] execution=persistent-emulator module={} callback=0x{:08x} batching=bounded parallelism={}",
             selection.module.display(),
             selection.callback_va,
+            x86_worker_pool
+                .as_ref()
+                .map(|pool| pool.current_num_threads())
+                .unwrap_or(1),
         );
         if let Some(runtime) = persistent_x86_runtime.as_mut() {
             runtime.enable_validated_production_execution();
@@ -9207,14 +9229,43 @@ fn unpack(
         }
 
         let results: Vec<Result<UnpackEntry, LibraryError>> =
-            if let Some(runtime) = persistent_x86_runtime.as_mut() {
-                (batch_start..batch_end)
-                    .map(|index| {
-                        let result = solve_one(index, Some(&mut *runtime));
-                        solve_progress.tick();
-                        result
-                    })
-                    .collect()
+            if let (Some(selection), Some(pool)) =
+                (validated_x86_filter.as_ref(), x86_worker_pool.as_ref())
+            {
+                // The XP3 extraction callback is a pure function of
+                // (offset, hash, bytes); every worker owns an independent
+                // Unicorn instance (Unicorn is not Send/Sync), opened lazily
+                // on first use. Per-entry adler verification still gates
+                // acceptance, so a mismatch falls back to the normal path.
+                let key = format!("{}@{:08x}", selection.module.display(), selection.callback_va);
+                pool.install(|| {
+                    (batch_start..batch_end)
+                        .into_par_iter()
+                        .map(|index| {
+                            let result = X86_WORKER_RUNTIME.with(|cell| {
+                                let mut slot = cell.borrow_mut();
+                                if slot.as_ref().map(|(k, _)| k != &key).unwrap_or(true) {
+                                    let mut runtime = if selection.forced_callback {
+                                        X86Xp3FilterRuntime::open_with_callback(
+                                            &selection.module,
+                                            selection.callback_va,
+                                            selection.callback_source.clone(),
+                                            false,
+                                        )
+                                    } else {
+                                        X86Xp3FilterRuntime::open(&selection.module, false)
+                                    }?;
+                                    runtime.enable_validated_production_execution();
+                                    *slot = Some((key.clone(), runtime));
+                                }
+                                let runtime = &mut slot.as_mut().expect("runtime just opened").1;
+                                solve_one(index, Some(runtime))
+                            });
+                            solve_progress.tick();
+                            result
+                        })
+                        .collect()
+                })
             } else {
                 (batch_start..batch_end)
                     .into_par_iter()

@@ -1,0 +1,15 @@
+//! Try bounded DLL_PROCESS_ATTACH emulation on each module and print the outcome.
+use xp3_brute::initialize_x86_filter_module;
+
+fn main() {
+    for path in std::env::args().skip(1) {
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match initialize_x86_filter_module(&path, std::env::var_os("XP3_TRACE").is_some()) {
+            Ok(_) => println!("OK   {name}"),
+            Err(error) => println!("FAIL {name} :: {error}"),
+        }
+    }
+}

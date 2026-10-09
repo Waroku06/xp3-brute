@@ -76,7 +76,10 @@ impl Default for RecoveryConfig {
             compute_mode: ComputeMode::Auto,
             gpu_min_combinations: 1u128 << 16,
             gpu_min_period_bytes: 16 * 1024,
-            gpu_min_slot_candidates: 4 * 256,
+            // A GPU round trip (buffer setup + blocking readback behind a global
+            // lock) costs ~2 ms; the CPU FWHT scorer does ~340 slots in less. Only
+            // dispatch when the batch is large enough to amortise that.
+            gpu_min_slot_candidates: 4096 * 256,
         }
     }
 }
@@ -200,6 +203,9 @@ fn text_period_scores_compute(
 struct TextPeriodScoreCache {
     byte_aligned: Option<Vec<f64>>,
     parity_sensitive: Option<Vec<f64>>,
+    /// Byte-aligned coincidence scores for non-text (binary) hypotheses. They
+    /// reuse `byte_aligned` when it already exists.
+    binary: bool,
 }
 
 impl TextPeriodScoreCache {
@@ -210,8 +216,16 @@ impl TextPeriodScoreCache {
     ) -> Result<Self> {
         let mut need_byte_aligned = false;
         let mut need_parity_sensitive = false;
+        let mut need_binary = false;
         for hypothesis in hypotheses {
             let Some(model) = recovery_model_for_hypothesis(hypothesis.name) else {
+                // Header-only cribs cannot separate period P from 2P, 3P, ...
+                // or from any period >= crib length. Ciphertext coincidence
+                // supplies the missing period evidence for binary formats.
+                if !hypothesis.cribs.is_empty() {
+                    need_byte_aligned = true;
+                    need_binary = true;
+                }
                 continue;
             };
             if period_is_parity_sensitive(model) {
@@ -221,6 +235,7 @@ impl TextPeriodScoreCache {
             }
         }
         Ok(Self {
+            binary: need_binary,
             byte_aligned: if need_byte_aligned {
                 Some(text_period_scores_compute(ciphertext, false, config)?)
             } else {
@@ -235,7 +250,13 @@ impl TextPeriodScoreCache {
     }
 
     fn for_hypothesis(&self, hypothesis: &FormatHypothesis) -> Option<&[f64]> {
-        let model = recovery_model_for_hypothesis(hypothesis.name)?;
+        let Some(model) = recovery_model_for_hypothesis(hypothesis.name) else {
+            return if self.binary && !hypothesis.cribs.is_empty() {
+                self.byte_aligned.as_deref()
+            } else {
+                None
+            };
+        };
         if period_is_parity_sensitive(model) {
             self.parity_sensitive.as_deref()
         } else {
@@ -268,7 +289,9 @@ fn rank_hypothesis_periods(
     // for text. Scores are cached per ciphertext/parity class, so UTF-8 and
     // CP932 share one scan while UTF-16LE/BE and Kirikiri 16-bit text share
     // another instead of launching duplicate CPU/GPU period jobs.
-    if let Some(scores) = text_scores {
+    if let (Some(scores), None) = (text_scores, recovery_model_for_hypothesis(hypothesis.name)) {
+        rank_binary_periods_by_coincidence(&mut ranked, scores, config.min_period);
+    } else if let Some(scores) = text_scores {
         ranked.sort_by(|a, b| {
             let sa = scores[a.period - config.min_period];
             let sb = scores[b.period - config.min_period];
@@ -281,6 +304,45 @@ fn rank_hypothesis_periods(
         });
     }
     Ok(ranked)
+}
+
+/// Order crib-consistent periods for binary formats using ciphertext
+/// coincidence. A true period P makes lags P, 2P, 3P, ... all score well, so
+/// among periods scoring near the best one the smallest (the fundamental) wins.
+/// When no lag rises above the random baseline (compressed payload), the
+/// crib-only order is kept.
+fn rank_binary_periods_by_coincidence(
+    ranked: &mut Vec<PeriodCandidate>,
+    scores: &[f64],
+    min_period: usize,
+) {
+    const BASELINE: f64 = 1.0 / 256.0;
+    let score_of = |p: &PeriodCandidate| scores[p.period - min_period];
+    let best = ranked
+        .iter()
+        .filter(|p| p.conflicts == 0)
+        .map(score_of)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !best.is_finite() || best < BASELINE * 2.0 {
+        return;
+    }
+    let threshold = BASELINE + (best - BASELINE) * 0.6;
+    ranked.sort_by(|a, b| {
+        let (sa, sb) = (score_of(a), score_of(b));
+        let (ha, hb) = (sa >= threshold, sb >= threshold);
+        a.conflict_weight
+            .total_cmp(&b.conflict_weight)
+            .then_with(|| a.conflicts.cmp(&b.conflicts))
+            .then_with(|| hb.cmp(&ha))
+            .then_with(|| {
+                if ha && hb {
+                    a.period.cmp(&b.period)
+                } else {
+                    sb.total_cmp(&sa)
+                }
+            })
+            .then_with(|| a.period.cmp(&b.period))
+    });
 }
 
 fn refine_period(
@@ -969,5 +1031,41 @@ mod tests {
             .keys
             .iter()
             .any(|candidate| candidate.as_slice() == key.as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod binary_period_tests {
+    use super::*;
+    use crate::text::period_score_with_parity;
+
+    #[test]
+    fn header_only_cribs_pick_fundamental_period_from_coincidence() {
+        // Mostly-zero plaintext (padding-heavy binary) under a 256-byte key.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let key: Vec<u8> = (0..256)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        let mut plain = vec![0u8; 64 * 1024];
+        plain[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        for i in (1000..plain.len()).step_by(997) {
+            plain[i] = (i % 251) as u8;
+        }
+        let cipher: Vec<u8> = plain.iter().enumerate().map(|(i, b)| b ^ key[i % 256]).collect();
+
+        let cribs = vec![Crib::new(0, &plain[..8])];
+        let mut ranked = rank_periods(&cipher, &cribs, 1, 1100).unwrap();
+        // Crib-only order is wrong: the shortest consistent period wins.
+        assert_eq!(ranked[0].period, 8);
+        let scores: Vec<f64> = (1..=1100)
+            .map(|p| period_score_with_parity(&cipher, p, false))
+            .collect();
+        rank_binary_periods_by_coincidence(&mut ranked, &scores, 1);
+        assert_eq!(ranked[0].period, 256);
     }
 }

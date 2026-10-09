@@ -259,6 +259,48 @@ fn char_score(ch: u16) -> f64 {
     }
 }
 
+/// Per-slot byte classes for a text model: `(class, score LUT indexed by plain byte)`.
+/// A class groups ciphertext positions whose plain-byte score depends only on
+/// the plain byte value, so a candidate key byte is scored from histograms.
+fn independent_key_classes(model: TextRecoveryModel) -> Vec<[f64; 256]> {
+    let lut = |f: &dyn Fn(u8) -> f64| {
+        let mut table = [0.0f64; 256];
+        for (plain, entry) in table.iter_mut().enumerate() {
+            *entry = f(plain as u8);
+        }
+        table
+    };
+    match model {
+        // class 0: low byte, class 1: high byte
+        TextRecoveryModel::Utf16Le => vec![
+            lut(&|b| utf16_byte_score(0, b, true)),
+            lut(&|b| utf16_byte_score(1, b, true)),
+        ],
+        TextRecoveryModel::Utf16Be => vec![
+            lut(&|b| utf16_byte_score(1, b, false)),
+            lut(&|b| utf16_byte_score(0, b, false)),
+        ],
+        TextRecoveryModel::Utf8 => vec![lut(&utf8_byte_score)],
+        TextRecoveryModel::Cp932 => vec![lut(&cp932_byte_score)],
+        TextRecoveryModel::KirikiriMode0 => vec![lut(&|b| encoded_mode0_byte_score(5, b))],
+        TextRecoveryModel::KirikiriMode1 => vec![
+            lut(&|b| encoded_mode1_byte_score(5, b)),
+            lut(&|b| encoded_mode1_byte_score(6, b)),
+        ],
+    }
+}
+
+fn independent_key_class_of(model: TextRecoveryModel, pos: usize) -> Option<usize> {
+    match model {
+        TextRecoveryModel::Utf16Le => Some(pos % 2),
+        TextRecoveryModel::Utf16Be => Some(1 - pos % 2),
+        TextRecoveryModel::Utf8 | TextRecoveryModel::Cp932 => Some(0),
+        // Positions before the 5-byte header contribute exactly 0.0.
+        TextRecoveryModel::KirikiriMode0 => (pos >= 5).then_some(0),
+        TextRecoveryModel::KirikiriMode1 => (pos >= 5).then(|| (pos - 5) % 2),
+    }
+}
+
 fn choose_independent_key(
     ciphertext: &[u8],
     period: &PeriodCandidate,
@@ -267,6 +309,7 @@ fn choose_independent_key(
     let used = period.period.min(ciphertext.len());
     let mut key = vec![0u8; period.period];
     let mut fixed = vec![false; period.period];
+    let luts = independent_key_classes(model);
 
     for slot in 0..used {
         if let Some(value) = period.key.get(slot).copied().flatten() {
@@ -275,96 +318,34 @@ fn choose_independent_key(
             continue;
         }
 
-        let mut low_hist = [0u32; 256];
-        let mut high_hist = [0u32; 256];
-        let mut all_hist = [0u32; 256];
+        let mut hist = vec![[0u32; 256]; luts.len()];
         let mut pos = slot;
         while pos < ciphertext.len() {
-            all_hist[ciphertext[pos] as usize] += 1;
-            match model {
-                TextRecoveryModel::Utf16Le => {
-                    if pos % 2 == 1 {
-                        high_hist[ciphertext[pos] as usize] += 1;
-                    } else {
-                        low_hist[ciphertext[pos] as usize] += 1;
-                    }
-                }
-                TextRecoveryModel::Utf16Be => {
-                    if pos % 2 == 0 {
-                        high_hist[ciphertext[pos] as usize] += 1;
-                    } else {
-                        low_hist[ciphertext[pos] as usize] += 1;
-                    }
-                }
-                _ => {}
+            if let Some(class) = independent_key_class_of(model, pos) {
+                hist[class][ciphertext[pos] as usize] += 1;
             }
             pos += period.period;
         }
+        // Score only ciphertext values that actually occur in this slot.
+        let sparse: Vec<Vec<(u8, f64)>> = hist
+            .iter()
+            .map(|h| {
+                h.iter()
+                    .enumerate()
+                    .filter(|(_, &n)| n != 0)
+                    .map(|(c, &n)| (c as u8, n as f64))
+                    .collect()
+            })
+            .collect();
 
         let mut best = (f64::NEG_INFINITY, 0u8);
         for candidate in 0u16..=255 {
             let k = candidate as u8;
             let mut score = 0.0;
-            match model {
-                TextRecoveryModel::Utf16Le | TextRecoveryModel::Utf16Be => {
-                    for cipher in 0..256 {
-                        if low_hist[cipher] != 0 {
-                            let plain = cipher as u8 ^ k;
-                            let offset_parity = if matches!(model, TextRecoveryModel::Utf16Le) {
-                                0
-                            } else {
-                                1
-                            };
-                            score += low_hist[cipher] as f64
-                                * utf16_byte_score(
-                                    offset_parity,
-                                    plain,
-                                    matches!(model, TextRecoveryModel::Utf16Le),
-                                );
-                        }
-                        if high_hist[cipher] != 0 {
-                            let plain = cipher as u8 ^ k;
-                            let offset_parity = if matches!(model, TextRecoveryModel::Utf16Le) {
-                                1
-                            } else {
-                                0
-                            };
-                            score += high_hist[cipher] as f64
-                                * utf16_byte_score(
-                                    offset_parity,
-                                    plain,
-                                    matches!(model, TextRecoveryModel::Utf16Le),
-                                );
-                        }
-                    }
-                }
-                TextRecoveryModel::Utf8 => {
-                    for cipher in 0..256 {
-                        if all_hist[cipher] != 0 {
-                            score += all_hist[cipher] as f64 * utf8_byte_score(cipher as u8 ^ k);
-                        }
-                    }
-                }
-                TextRecoveryModel::Cp932 => {
-                    for cipher in 0..256 {
-                        if all_hist[cipher] != 0 {
-                            score += all_hist[cipher] as f64 * cp932_byte_score(cipher as u8 ^ k);
-                        }
-                    }
-                }
-                TextRecoveryModel::KirikiriMode0 => {
-                    let mut p = slot;
-                    while p < ciphertext.len() {
-                        score += encoded_mode0_byte_score(p, ciphertext[p] ^ k);
-                        p += period.period;
-                    }
-                }
-                TextRecoveryModel::KirikiriMode1 => {
-                    let mut p = slot;
-                    while p < ciphertext.len() {
-                        score += encoded_mode1_byte_score(p, ciphertext[p] ^ k);
-                        p += period.period;
-                    }
+            for (class, entries) in sparse.iter().enumerate() {
+                let lut = &luts[class];
+                for &(cipher, count) in entries {
+                    score += count * lut[(cipher ^ k) as usize];
                 }
             }
             if score > best.0 {
@@ -565,5 +546,66 @@ mod tests {
         period.known_slots = 2;
         let guesses = guess_text_keys(&cipher, &period, TextRecoveryModel::Utf16Le, 2);
         assert!(guesses.iter().any(|guess| guess == &key));
+    }
+
+    #[test]
+    fn independent_key_matches_naive_positional_scoring() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let cipher: Vec<u8> = (0..6000).map(|_| (next() >> 11) as u8).collect();
+        for model in [
+            TextRecoveryModel::Utf16Le,
+            TextRecoveryModel::Utf16Be,
+            TextRecoveryModel::Utf8,
+            TextRecoveryModel::Cp932,
+            TextRecoveryModel::KirikiriMode0,
+            TextRecoveryModel::KirikiriMode1,
+        ] {
+            for period in [1usize, 7, 31, 64] {
+                let candidate = empty_period(period);
+                let (key, _) = choose_independent_key(&cipher, &candidate, model);
+                for slot in 0..period {
+                    let score_at = |k: u8| -> f64 {
+                        let mut total = 0.0;
+                        let mut pos = slot;
+                        while pos < cipher.len() {
+                            let plain = cipher[pos] ^ k;
+                            total += match model {
+                                TextRecoveryModel::Utf16Le => utf16_byte_score(pos, plain, true),
+                                TextRecoveryModel::Utf16Be => utf16_byte_score(pos, plain, false),
+                                TextRecoveryModel::Utf8 => utf8_byte_score(plain),
+                                TextRecoveryModel::Cp932 => cp932_byte_score(plain),
+                                TextRecoveryModel::KirikiriMode0 => {
+                                    encoded_mode0_byte_score(pos, plain)
+                                }
+                                TextRecoveryModel::KirikiriMode1 => {
+                                    encoded_mode1_byte_score(pos, plain)
+                                }
+                            };
+                            pos += period;
+                        }
+                        total
+                    };
+                    let mut best = (f64::NEG_INFINITY, 0u8);
+                    for k in 0..=255u8 {
+                        let score = score_at(k);
+                        if score > best.0 {
+                            best = (score, k);
+                        }
+                    }
+                    // Non-dyadic weights (0.8) make float summation order matter at
+                    // the last ulp, so compare achieved score rather than argmax.
+                    assert!(
+                        (score_at(key[slot]) - best.0).abs() < 1.0e-9,
+                        "{model:?} period={period} slot={slot}"
+                    );
+                }
+            }
+        }
     }
 }

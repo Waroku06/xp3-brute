@@ -810,11 +810,15 @@ fn discover_ogg_cribs(
     // its lacing table decryptable and allow exact page walking to continue.
     const ANCHOR: &[u8] = b"OggS\0";
     if ciphertext.len() >= ANCHOR.len() {
+        // Track the key slot incrementally; a variable-modulus `%` per byte
+        // dominated this scan on multi-MiB files.
+        let period = candidate.period;
+        let mut start_slot = 1 % period;
         for offset in 1..=ciphertext.len() - ANCHOR.len() {
             let mut known = 0usize;
             let mut mismatch = false;
+            let mut slot = start_slot;
             for (delta, &plain) in ANCHOR.iter().enumerate() {
-                let slot = (offset + delta) % candidate.period;
                 if let Some(key) = candidate.key[slot] {
                     known += 1;
                     if ciphertext[offset + delta] ^ plain != key {
@@ -822,9 +826,17 @@ fn discover_ogg_cribs(
                         break;
                     }
                 }
+                slot += 1;
+                if slot == period {
+                    slot = 0;
+                }
             }
             if !mismatch && known >= 4 {
                 push_unique(&mut out, &mut seen, Crib::new(offset as u64, ANCHOR));
+            }
+            start_slot += 1;
+            if start_slot == period {
+                start_slot = 0;
             }
         }
     }
