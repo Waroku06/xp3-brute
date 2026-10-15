@@ -33,7 +33,7 @@ rayon = "1.10"
 encoding_rs = "0.8"
 chacha20poly1305 = "0.10"
 pelite = "0.10.0"
-unicorn-engine = "2.1.5"
+unicorn-engine = { version = "2.1.5", default-features = false, features = ["arch_x86"] }
 sha3 = "0.10"
 blake2 = "0.10.6"
 argon2 = "0.5.3"
