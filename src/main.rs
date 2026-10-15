@@ -5977,6 +5977,151 @@ fn validate_special_xor_as_content_key_streaming(
     })
 }
 
+#[derive(Default)]
+struct FormatXorEvidence {
+    strong_entries: usize,
+    tested_entries: usize,
+    adler_matches: usize,
+    bytes: usize,
+}
+
+/// Infer a one-byte content XOR key from a format hypothesis whose exact crib
+/// bytes all imply the same key byte.  This is intentionally limited to text
+/// resources: several protected Kirikiri archives use a fixed XOR filter while
+/// reusing the filter parameter in every `adlr` field, so the normal checksum
+/// gate rejects the otherwise unambiguous UTF-16 BOM evidence.
+fn constant_xor_key_for_hypothesis(
+    ciphertext: &[u8],
+    hypothesis: &xp3_brute::FormatHypothesis,
+) -> Option<u8> {
+    if !hypothesis.name.starts_with("Text/") {
+        return None;
+    }
+    let mut key = None;
+    let mut observations = 0usize;
+    for crib in &hypothesis.cribs {
+        let base = usize::try_from(crib.offset).ok()?;
+        for (delta, &plain) in crib.plaintext.iter().enumerate() {
+            let position = base.checked_add(delta)?;
+            let &cipher = ciphertext.get(position)?;
+            let candidate = cipher ^ plain;
+            if let Some(existing) = key {
+                if existing != candidate {
+                    return None;
+                }
+            } else {
+                key = Some(candidate);
+            }
+            observations += 1;
+        }
+    }
+    if observations != 0 {
+        key
+    } else {
+        None
+    }
+}
+
+/// Find a cheap archive-wide fixed XOR filter before probing every executable
+/// in a game directory.  The candidate must produce strong, extension-backed
+/// plaintext in at least three independent entries; this keeps the shortcut
+/// conservative while avoiding the expensive generic x86 search for archives
+/// whose format evidence already identifies the filter.
+fn find_format_backed_global_key(
+    archive: &Archive,
+    ordered_names: Option<&xp3_brute::OrderedNameRecovery>,
+) -> Result<Option<xp3_brute::PeriodCandidate>, LibraryError> {
+    const MAX_SAMPLE_COUNT: usize = 64;
+    const MAX_SAMPLE_BYTES: usize = 32 * 1024 * 1024;
+
+    let mut evidence = HashMap::<u8, FormatXorEvidence>::new();
+    let mut sampled_entries = 0usize;
+    let mut sampled_bytes = 0usize;
+
+    for (index, entry) in archive.entries.iter().enumerate() {
+        if sampled_entries >= MAX_SAMPLE_COUNT || sampled_bytes >= MAX_SAMPLE_BYTES {
+            break;
+        }
+        let name = effective_entry_name(entry, index, ordered_names);
+        let hypotheses = hypotheses_for_name(name);
+        if !hypotheses.iter().any(|hypothesis| {
+            hypothesis.name.starts_with("Text/") && !hypothesis.cribs.is_empty()
+        }) {
+            continue;
+        }
+        let raw = match archive.reconstruct_entry(index) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        if raw.len() > MAX_SAMPLE_BYTES.saturating_sub(sampled_bytes) {
+            continue;
+        }
+        sampled_entries += 1;
+        sampled_bytes = sampled_bytes.saturating_add(raw.len());
+
+        let mut keys = HashSet::<u8>::new();
+        for hypothesis in &hypotheses {
+            if let Some(key) = constant_xor_key_for_hypothesis(&raw, hypothesis) {
+                keys.insert(key);
+            }
+        }
+        for key in keys {
+            let mut plaintext = raw.clone();
+            for byte in &mut plaintext {
+                *byte ^= key;
+            }
+            let strong = hypotheses.iter().any(|hypothesis| {
+                constant_xor_key_for_hypothesis(&raw, hypothesis) == Some(key)
+                    && validate_hypothesis(hypothesis.name, &plaintext).is_strong()
+            });
+            if !strong {
+                continue;
+            }
+            let item = evidence.entry(key).or_default();
+            item.strong_entries += 1;
+            item.bytes = item.bytes.saturating_add(raw.len());
+            if let Some(expected) = entry.adler {
+                item.tested_entries += 1;
+                if xp3_brute::adler32(&plaintext) == expected {
+                    item.adler_matches += 1;
+                }
+            }
+        }
+    }
+
+    let Some((&key, selected)) = evidence.iter().max_by_key(|(_, item)| {
+        (
+            item.strong_entries,
+            item.bytes,
+            item.adler_matches,
+        )
+    }) else {
+        return Ok(None);
+    };
+    if selected.strong_entries < 3 || selected.bytes < 1024 {
+        return Ok(None);
+    }
+
+    eprintln!(
+        "[recovery      ] format-xor candidate entries={} bytes={} adlr={}/{} validation=strong",
+        selected.strong_entries,
+        selected.bytes,
+        selected.adler_matches,
+        selected.tested_entries,
+    );
+    Ok(Some(xp3_brute::PeriodCandidate {
+        period: 1,
+        conflicts: 0,
+        conflict_weight: 0.0,
+        agreements: selected.strong_entries.saturating_sub(1),
+        agreement_weight: selected.strong_entries.saturating_sub(1) as f64,
+        known_slots: 1,
+        used_slots: 1,
+        implied_plaintext_bytes: selected.bytes as u64,
+        key: vec![Some(key)],
+    }))
+}
+
 fn find_global_shared_key(
     archive: &Archive,
     max_period: usize,
@@ -6300,6 +6445,7 @@ struct UnpackEntry {
 enum GlobalKeySource {
     SpecialIndex,
     SharedProbe,
+    FormatProbe,
 }
 
 impl GlobalKeySource {
@@ -6307,6 +6453,7 @@ impl GlobalKeySource {
         match self {
             Self::SpecialIndex => "special-index",
             Self::SharedProbe => "shared-probe",
+            Self::FormatProbe => "format-probe",
         }
     }
 }
@@ -7311,6 +7458,18 @@ fn select_validated_x86_filter(
     scan_target: &Path,
     ordered_names: Option<&OrderedNameRecovery>,
 ) -> Result<Option<ValidatedX86Filter>, LibraryError> {
+    // Do this cheap archive-side check before opening or scanning any PE.  A
+    // plain XP3 has no filter candidate to discover, and walking a large game
+    // directory in that case only creates the appearance of a hang.
+    let (sample_indices, sample_bytes) = content_filter_validation_samples(archive, ordered_names)?;
+    if sample_indices.is_empty() {
+        eprintln!(
+            "[content-filter] route=generic-x86 target={} probe=skipped reason=no-encrypted-samples",
+            scan_target.display(),
+        );
+        return Ok(None);
+    }
+
     let reports = match probe_x86_filter_path(
         scan_target,
         FilterProbeOptions {
@@ -7329,7 +7488,6 @@ fn select_validated_x86_filter(
         }
     };
 
-    let (sample_indices, sample_bytes) = content_filter_validation_samples(archive, ordered_names)?;
     let proven_candidates = reports
         .iter()
         .map(|report| {
@@ -7648,9 +7806,6 @@ fn select_recovered_cxdec_engine(
     scan_target: &Path,
     ordered_names: Option<&OrderedNameRecovery>,
 ) -> Result<Option<Arc<CxdecEngine>>, LibraryError> {
-    let (generated_controls, generated_mask_offsets) =
-        verified_setup_archive_generated_values(archive, scan_target)
-            .map_err(|error| LibraryError::InvalidArgument(error.to_string()))?;
     let protected_index = cxdec_special_name_map_active(ordered_names);
 
     // Select samples from the Special-resolved resource set.  Protected CXDEC
@@ -7700,6 +7855,18 @@ fn select_recovered_cxdec_engine(
         selected.push(index);
         sample_bytes = sample_bytes.saturating_add(size);
     }
+
+    if selected.is_empty() {
+        eprintln!(
+            "[cxdec-params   ] route=generic target={} probe=skipped reason=no-encrypted-samples",
+            scan_target.display(),
+        );
+        return Ok(None);
+    }
+
+    let (generated_controls, generated_mask_offsets) =
+        verified_setup_archive_generated_values(archive, scan_target)
+            .map_err(|error| LibraryError::InvalidArgument(error.to_string()))?;
 
     let coherent = recover_coherent_runtime_cxdec_params_from_game_with_generated_values(
         scan_target,
@@ -8410,6 +8577,24 @@ fn unpack(
     let mut validated_x86_filter: Option<ValidatedX86Filter> = None;
     let mut x86_filter_module_sha: Option<String> = None;
 
+    // A fixed format-backed XOR key is both cheaper and more reliable than
+    // scanning every sibling PE for a callback.  Only use this automatic path
+    // when the caller did not provide an explicit executable/filter target;
+    // explicit targets retain their requested native-filter precedence.
+    let explicit_filter_target = cxdec_scan_target.is_some()
+        || x86_filter_module.is_some()
+        || hx_options.explicit_exe().is_some();
+    if global_key.is_none() && !archive.is_hxv4() && !explicit_filter_target {
+        if let Some(candidate) =
+            find_format_backed_global_key(archive, ordered_names.as_ref())?
+        {
+            global_key = Some(GlobalKeySelection {
+                source: GlobalKeySource::FormatProbe,
+                candidate,
+            });
+        }
+    }
+
     if global_key.is_none() && !archive.is_hxv4() {
         let scan_target = automatic_cxdec_scan_target(
             archive,
@@ -8474,8 +8659,13 @@ fn unpack(
                 });
             }
         }
-    } else {
+    } else if global_key
+        .as_ref()
+        .is_some_and(|key| key.source == GlobalKeySource::SpecialIndex)
+    {
         eprintln!("[recovery      ] native-filter and generic shared-key probes skipped because validated Special-derived content key already succeeded");
+    } else {
+        eprintln!("[recovery      ] native-filter and generic shared-key probes skipped because a format-backed archive key already succeeded");
     }
 
     // A validated archive-wide key can be applied directly. This path is used

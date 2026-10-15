@@ -1,5 +1,7 @@
 # xp3-brute
 
+[中文版 README](README.zh-CN.md)
+
 `xp3-brute` is a cross-platform tool for extracting, recovering, converting, and rebuilding KiriKiri XP3 archives. It can automatically detect all information needed to unpack protected archives.
 
 ```bash
