@@ -34,11 +34,12 @@
           };
           bindgenExtraClangArgs =
             if pkgs.stdenv.hostPlatform.isLinux then
-              lib.concatStringsSep " " (map builtins.readFile [
-                "${pkgs.stdenv.cc}/nix-support/cc-cflags"
-                "${pkgs.stdenv.cc}/nix-support/libc-cflags"
-                "${pkgs.stdenv.cc}/nix-support/libcxx-cxxflags"
-              ])
+              lib.concatStringsSep " "
+                (map builtins.readFile [
+                  "${pkgs.stdenv.cc}/nix-support/cc-cflags"
+                  "${pkgs.stdenv.cc}/nix-support/libc-cflags"
+                  "${pkgs.stdenv.cc}/nix-support/libcxx-cxxflags"
+                ])
             else
               "";
           package = pkgs.rustPlatform.buildRustPackage {
@@ -52,15 +53,19 @@
             # reference vector. Keep the remaining library tests in the Nix
             # build while leaving the source tests unchanged.
             cargoTestFlags = [
-              "--package" pname
+              "--package"
+              pname
               "--lib"
               "--"
-              "--skip" "kinglove_static_registration_is_not_an_execution_backend"
-              "--skip" "yuz_keystream_matches_independent_reference_vector"
+              "--skip"
+              "kinglove_static_registration_is_not_an_execution_backend"
+              "--skip"
+              "yuz_keystream_matches_independent_reference_vector"
             ];
 
             nativeBuildInputs = [
               pkgs.cmake
+              pkgs.installShellFiles
               pkgs.llvmPackages.libclang
               pkgs.pkg-config
             ];
@@ -72,6 +77,26 @@
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             BINDGEN_EXTRA_CLANG_ARGS = bindgenExtraClangArgs;
             NIX_LDFLAGS = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "-latomic";
+
+            postInstall = ''
+              completion_dir="$TMPDIR/xp3brute-completions"
+              mkdir -p "$completion_dir"
+              "$out/bin/xp3brute" completions bash > "$completion_dir/xp3brute.bash"
+              "$out/bin/xp3brute" completions zsh > "$completion_dir/_xp3brute"
+              "$out/bin/xp3brute" completions fish > "$completion_dir/xp3brute.fish"
+              "$out/bin/xp3brute" completions powershell > "$completion_dir/xp3brute.ps1"
+              "$out/bin/xp3brute" completions elvish > "$completion_dir/xp3brute.elvish"
+
+              installShellCompletion \
+                --bash "$completion_dir/xp3brute.bash" \
+                --zsh "$completion_dir/_xp3brute" \
+                --fish "$completion_dir/xp3brute.fish"
+
+              install -D "$completion_dir/xp3brute.ps1" \
+                "$out/share/xp3brute/completions/xp3brute.ps1"
+              install -D "$completion_dir/xp3brute.elvish" \
+                "$out/share/xp3brute/completions/xp3brute.elvish"
+            '';
 
             meta = {
               description = cargoToml.package.description;
@@ -94,17 +119,46 @@
         };
       });
 
+      nixosModules.default = { config, lib, pkgs, ... }:
+        let
+          cfg = config.programs.xp3brute;
+        in
+        {
+          options.programs.xp3brute = {
+            enable = lib.mkEnableOption "the xp3brute XP3 archive tool and shell completions";
+
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.system}.default;
+              defaultText = lib.literalExpression "xp3-brute.packages.${pkgs.system}.default";
+              description = "The xp3brute package to install.";
+            };
+          };
+
+          config = lib.mkIf cfg.enable {
+            programs.bash.completion.enable = lib.mkDefault true;
+            environment.systemPackages = [ cfg.package ];
+            environment.pathsToLink = [
+              "/share/bash-completion"
+              "/share/fish"
+              "/share/xp3brute"
+              "/share/zsh"
+            ];
+          };
+        };
+
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
           bindgenExtraClangArgs =
             if pkgs.stdenv.hostPlatform.isLinux then
-              lib.concatStringsSep " " (map builtins.readFile [
-                "${pkgs.stdenv.cc}/nix-support/cc-cflags"
-                "${pkgs.stdenv.cc}/nix-support/libc-cflags"
-                "${pkgs.stdenv.cc}/nix-support/libcxx-cxxflags"
-              ])
+              lib.concatStringsSep " "
+                (map builtins.readFile [
+                  "${pkgs.stdenv.cc}/nix-support/cc-cflags"
+                  "${pkgs.stdenv.cc}/nix-support/libc-cflags"
+                  "${pkgs.stdenv.cc}/nix-support/libcxx-cxxflags"
+                ])
             else
               "";
         in

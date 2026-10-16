@@ -86,7 +86,7 @@ nix develop
 cargo build --release
 ```
 
-若要从独立的 NixOS 系统 Flake 使用此软件包，将本仓库添加为输入，并加入 `environment.systemPackages`：
+若要从独立的 NixOS 系统 Flake 使用此软件包，将本仓库添加为输入，导入其 NixOS module，并启用程序。该 module 会自动安装 CLI，并注册 Bash、Zsh 和 Fish 补全文件；PowerShell 和 Elvish 补全文件也会安装在软件包的 `share/xp3brute/completions` 目录中：
 
 ```nix
 {
@@ -98,11 +98,12 @@ cargo build --release
     in {
       nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [{
-          environment.systemPackages = [
-            xp3-brute.packages.${system}.default
-          ];
-        }];
+        modules = [
+          xp3-brute.nixosModules.default
+          ({ ... }: {
+            programs.xp3brute.enable = true;
+          })
+        ];
       };
     };
 }
@@ -115,6 +116,24 @@ sudo nixos-rebuild switch --flake .#<hostname>
 ```
 
 如果尚未启用 flakes，先将 `nix.settings.experimental-features = [ "nix-command" "flakes" ];` 加入 NixOS 配置。
+
+### Shell 补全与帮助语言
+
+启用 `xp3-brute.nixosModules.default` 后，NixOS module 会自动安装标准的
+Bash、Zsh 和 Fish 补全路径。PowerShell 和 Elvish 脚本会安装在软件包的
+`share/xp3brute/completions` 目录中。
+
+如果使用独立二进制文件或非 NixOS 系统，请为正在使用的 shell 生成补全脚本，并按照该 shell 的通常配置方式加载：
+
+```bash
+xp3brute completions bash > ~/.local/share/bash-completion/completions/xp3brute
+xp3brute completions zsh > ~/.zfunc/_xp3brute
+xp3brute completions fish > ~/.config/fish/completions/xp3brute.fish
+xp3brute completions powershell > xp3brute.ps1
+```
+
+该命令也支持 `elvish`。使用 `xp3brute --help` 查看英文帮助，使用
+`xp3brute --help-zh` 或 `xp3brute --help --lang zh` 查看中文版。
 
 ### Python / CPython 绑定
 

@@ -695,6 +695,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match command.as_str() {
+        "completion" | "completions" => {
+            let shell = required(&mut args, "shell")?;
+            if args.next().is_some() {
+                return Err(cli_error(
+                    "completions accepts one shell: bash, zsh, fish, powershell, or elvish",
+                )
+                .into());
+            }
+            print_completions(&shell)?;
+        }
         "devices" => {
             print_devices();
         }
@@ -1955,7 +1965,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             probe(&archive, max_period, top, exhaustive_dynamic, compute_mode)?;
         }
-        "help" | "--help" | "-h" => usage(),
+        "help" | "--help" | "-h" => {
+            let rest = args.collect::<Vec<_>>();
+            print_usage(parse_help_language(&rest)?);
+        }
+        "--help-zh" => {
+            if args.next().is_some() {
+                return Err(cli_error("--help-zh does not accept additional arguments").into());
+            }
+            print_usage(HelpLanguage::Chinese);
+        }
         _ => {
             usage();
             return Err(cli_error(format!("unknown command: {command}")).into());
@@ -10991,87 +11010,450 @@ fn safe_relative_path(name: &str, index: usize) -> PathBuf {
     }
 }
 
-fn usage() {
-    eprintln!(
-        "xp3brute\n\
-         \n\
-         Commands:\n\
-           devices\n\
-           decode-pbd <input.pbd> [output.json]\n\
-           encode-pbd|pack-pbd <input.json> <output.pbd>\n\
-           encode-amv|pack-amv <frames-dir> <output.amv> [--fps N] [--quality 1..=100]\n\
-           encode-tlg|pack-tlg <input.png|jpg|bmp> <output.tlg> [--components 1|3|4] [--allow-lossy]\n\
-           rebuild-assets|encode-assets <unpack-dir> [--out-dir DIR|--in-place] [--allow-lossy]\n\
-           verify-roundtrip <unpack-dir> [--output FILE] [--source-archive ORIGINAL.xp3]\n\
-                            [--rebuilt-dir DIR] [--allow-lossy] [--compact-layout] [--json]\n\
-           pack|pack-xp3 <unpack-dir> <output.xp3> [--source-archive ORIGINAL.xp3] [--rebuilt-dir DIR]\n\
-                         [--no-rebuild-assets] [--allow-lossy] [--compact-layout] [--verbose]\n\
-           decode-tlg <input.tlg> <output.png|jpg|bmp> [--format png|jpg|jpeg|bmp]\n\
-                      [--jpeg-quality 1..100] [--show-tags]\n\
-           pe-unpack|pe-normalize <packed.exe> <output.exe>\n\
-           filter-probe <game.exe|module.dll|plugin.tpm|game-dir> [--static-only|--dynamic-v2link] [--trace-code]\n\
-           filter-apply <module.dll|plugin.tpm> <input> <output> --hash N [--offset N] [--trace-code]\n\
-           exe-analyze <game.exe> [--archive data.xp3] [--dump-bootstrap FILE] [--dump-startup FILE]\n\
-           inspect <archive> [--special-max-period 1..4096] [--special-xor-key HEX]\n\
-                   [--special-xor-scope prefix|whole]\n\
-                   [--exe game.exe] [--no-exe-auto] [--hx-key HEX64 --hx-nonce HEX48]\n\
-                   [--hx-names HxNames.lst] [--name-dict FILE]\n\
-           scan-special <archive> [--special-max-period 1..4096]\n\
-                        [--special-xor-key HEX --special-xor-scope prefix|whole]\n\
-           decode-special <archive> <output> [--special-max-period 1..4096]\n\
-                          [--special-xor-key HEX --special-xor-scope prefix|whole]\n\
-                          [--exe game.exe] [--no-exe-auto] [--hx-key HEX64 --hx-nonce HEX48]\n\
-           dump-special <archive> <output>\n\
-           hx-index <archive> [--exe game.exe] [--no-exe-auto] [--hx-key HEX64 --hx-nonce HEX48]\n\
-                    [--hx-names HxNames.lst] [--name-dict FILE] [--out FILE]\n\
-           extract-raw <archive> <out-dir>\n\
-           shared-probe <archive> [--max-period N] [--top N] [--no-progress]\n\
-           unpack <archive> <out-dir> [--max-period N] [--top-periods N] [--exhaustive-dynamic]\n\
-                  [--compute auto|cpu|gpu|hybrid] [--special-max-period 1..4096]\n\
-                  [--special-xor-key HEX --special-xor-scope prefix|whole]\n\
-                  [--exe game.exe] [--no-exe-auto] [--hx-key HEX64 --hx-nonce HEX48] [--hx-names HxNames.lst]\n\
-                  [--name-dict FILE] [--hx-game-dir DIR] [--no-hx-name-bootstrap]\n\
-                  [--filter-exe game.exe|module.dll|plugin.tpm|game-dir]\n\
-                  [--unpacker-all] [--tjs emit|decompile|none] [--tlg png|jpg|bmp|none]\n\
-                  [--psb all|json|png|jpg|bmp|none] [--pbd json|none] [--amv png|none]\n\
-                  [--no-progress] [--verbose]\n\
-                  (normal unpack defaults to no derived conversion; --unpacker-all enables\n\
-                   TJS2->high-level source, TLG->PNG, PSB-family->JSON+PNG image blobs+raw unknown blobs,\n\
-                   PBD->JSON, and AMV->PNG frames; explicit per-decoder options override --unpacker-all\n\
-                   regardless of command-line order)\n\
-           probe <archive> [--max-period N] [--top N] [--exhaustive-dynamic] [--compute auto|cpu|gpu|hybrid]\n\
-           xor-recover <file> [--min-period N] [--max-period N] [--top N] --crib OFFSET:HEX ...\n\
-         \n\
-         Historical special-index recovery follows KrkrExtract semantics:\n\
-           descriptor -> stored blob -> optional transform of first min(size,0x100) bytes\n\
-                      -> zlib -> sequential M2/Yuzu chunks -> order/hash/name-length validation.\n\
-         --special-max-period controls the structured whole-blob repeating-XOR attack (default 1024);\n\
-         exact M2 size/adlr/name-length constraints recover large keys without exhaustive search.\n\
-         The historical zlib/gzip decompressor-oracle brute force remains capped at period 5.\n\
-         --special-xor-key supplies a known byte keystream directly.  A title-specific native\n\
-         CxFilter that is not equivalent to these bounded models remains unresolved rather than\n\
-         fabricating names.  Structured special-index recovery uses CPU/Rayon; wgpu remains\n\
-         available for the large regular content-recovery kernels.\n\
-         Hxv4 Special is a separate authenticated envelope: tag[16] + XChaCha20 ciphertext.\n\
-         Descriptor bit 0 selects nonce slot 0/1.  Repeating-XOR/M2 period attacks are skipped.\n\
-         By default HXV4 scans sibling/parent EXEs, unwraps embedded PE images, decrypts bres\n\
-         STARTUP.TJS + BOOTSTRAP, reproduces the FilterManager KDF, and accepts key material\n\
-         only after Poly1305 + zlib + native Hx-object parsing succeeds.  --exe selects an\n\
-         explicit container; --hx-key/--hx-nonce remains the highest-priority manual override.\n\
-         unpack fails closed until this Special gate succeeds; entry reconstruction/solve never\n\
-         runs with a locked Hxv4 Special.\n\
-         Hash-only HXV4 indices run a game-wide exact hash-name bootstrap before ordinary content recovery.\n\
-         Resolved names are tried first. At the first hash-name fixed point, unresolved entries may be\n\
-         recovered through filename-independent strong format hypotheses only to mine more exact hash candidates;\n\
-         synthetic format names never satisfy the filename gate by themselves.\n\
-         startup.tjs is a data.xp3 bootstrap anchor, not an invariant of sibling HXV4 archives.\n\
-         extract-raw reconstructs XP3 raw/zlib segments but does not apply a title-specific\n\
-         extraction filter."
-    );
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HelpLanguage {
+    English,
+    Chinese,
 }
+
+fn parse_help_language(args: &[String]) -> Result<HelpLanguage, io::Error> {
+    let mut language = HelpLanguage::English;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--lang" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| cli_error("missing --lang value (expected en or zh)"))?;
+                language = match value.to_ascii_lowercase().as_str() {
+                    "en" | "en-us" | "english" => HelpLanguage::English,
+                    "zh" | "zh-cn" | "cn" | "chinese" => HelpLanguage::Chinese,
+                    _ => {
+                        return Err(cli_error(
+                            "--lang expects en, en-US, zh, or zh-CN",
+                        ))
+                    }
+                };
+            }
+            "--zh" | "--chinese" | "--help-zh" | "zh" | "zh-cn" => {
+                language = HelpLanguage::Chinese
+            }
+            "--en" | "--english" | "en" | "en-us" => language = HelpLanguage::English,
+            other => {
+                return Err(cli_error(format!(
+                    "unknown help option {other}; use --lang en|zh"
+                )))
+            }
+        }
+        index += 1;
+    }
+    Ok(language)
+}
+
+fn usage() {
+    print_usage(HelpLanguage::English);
+}
+
+fn print_usage(language: HelpLanguage) {
+    let text = match language {
+        HelpLanguage::English => HELP_EN,
+        HelpLanguage::Chinese => HELP_ZH,
+    };
+    println!("{text}");
+}
+
+const HELP_EN: &str = r#"xp3brute 0.3.7
+Cross-platform KiriKiri XP3 extraction, recovery, conversion, and rebuild tool.
+
+USAGE
+  xp3brute <COMMAND> [ARGUMENTS] [OPTIONS]
+  xp3brute --help [--lang en|zh]
+  xp3brute completions <SHELL>
+
+ARCHIVE WORKFLOWS
+  unpack <archive> <out-dir>       Recover and extract an XP3 archive.
+  inspect <archive>                 Inspect index, protection, and entry metadata.
+  extract-raw <archive> <out-dir>  Reconstruct raw XP3 segments without filters.
+  pack|pack-xp3 <dir> <archive>    Rebuild an XP3 archive from an unpack directory.
+  rebuild-assets|encode-assets     Rebuild converted assets in an unpack directory.
+  verify-roundtrip <dir>           Verify that an unpack directory can be repacked.
+
+RESOURCE CONVERSION
+  decode-pbd <input> [output]      Decode PBD to JSON.
+  encode-pbd|pack-pbd <json> <out> Encode JSON as PBD.
+  decode-tlg <input> <output>      Decode TLG to PNG/JPEG/BMP.
+  encode-tlg|pack-tlg <image> <out> Encode PNG/JPEG/BMP as TLG.
+  encode-amv|pack-amv <frames> <out> Encode image frames as AMV.
+
+RECOVERY AND DIAGNOSTICS
+  devices                          List CPU/GPU backends.
+  filter-probe <target>            Detect and analyze an XP3 content filter.
+  filter-apply <module> <in> <out> Apply a filter to one raw entry.
+  exe-analyze <game.exe>           Inspect executable bootstrap data.
+  pe-unpack|pe-normalize <in> <out> Normalize a packed PE executable.
+  probe <archive>                  Rank archive-wide recovery hypotheses.
+  shared-probe <archive>           Probe shared repeating-XOR candidates.
+  xor-recover <file>               Recover a repeating-XOR stream from cribs.
+
+SPECIAL INDEX RECOVERY
+  scan-special <archive>            Scan a historical Special index.
+  decode-special <archive> <out>   Decode a Special index to a file.
+  dump-special <archive> <out>     Dump the raw Special index.
+  hx-index <archive>               Inspect an authenticated Hxv4 index.
+
+HELP AND COMPLETIONS
+  help [--lang en|zh]              Show this help text.
+  completions <bash|zsh|fish|powershell|elvish>
+                                   Print a shell completion script.
+
+COMMON OPTIONS
+  -h, --help                       Show English help.
+      --help-zh                    Show Chinese help.
+      --lang <en|zh>               Select the help language.
+      --verbose                    Include detailed recovery evidence.
+      --no-progress                Disable progress output.
+
+UNPACK OPTIONS
+      --compute <auto|cpu|gpu|hybrid>
+                                   Select the recovery backend.
+      --max-period <N>             Maximum ordinary XOR period.
+      --top-periods <N>            Number of ordinary candidates to retain.
+      --special-max-period <N>     Maximum Special-index XOR period (1..4096).
+      --special-xor-key <HEX>      Supply a Special-index keystream directly.
+      --special-xor-scope <prefix|whole>
+                                   Apply the supplied key to a prefix or whole blob.
+      --exe <PATH>                 Select the game executable explicitly.
+      --filter-exe <PATH>          Select a content-filter module or game directory.
+      --no-exe-auto                Disable executable discovery.
+      --hx-key <HEX64>             Hxv4 index key (requires --hx-nonce).
+      --hx-nonce <HEX48>           Hxv4 nonce (requires --hx-key).
+      --hx-names <FILE>            Load Hxv4 name mappings.
+      --name-dict <FILE>           Add candidate names for Hxv4 recovery.
+      --hx-game-dir <DIR>          Search this game directory for Hxv4 names.
+      --no-hx-name-bootstrap       Disable automatic Hxv4 name bootstrap.
+      --unpacker-all               Enable all lossless asset conversions.
+      --tjs <emit|decompile|none>  TJS2 output mode.
+      --tlg <png|jpg|bmp|none>     TLG output mode.
+      --psb <all|json|png|jpg|bmp|none>
+                                   PSB output mode.
+      --pbd <json|none>            PBD output mode.
+      --amv <png|none>             AMV output mode.
+
+NOTES
+  Normal unpack preserves original file bytes. --unpacker-all enables derived
+  TJS2, TLG, PSB, PBD, and AMV outputs. Hxv4 archives are opened only after
+  authenticated decryption and name recovery succeed. Unsupported native filters
+  remain unresolved instead of being replaced with fabricated plaintext.
+
+COMPLETION EXAMPLES
+  xp3brute completions bash > ~/.local/share/bash-completion/completions/xp3brute
+  xp3brute completions zsh  > ~/.zfunc/_xp3brute
+  xp3brute completions fish > ~/.config/fish/completions/xp3brute.fish
+  xp3brute completions powershell > xp3brute.ps1"#;
+
+const HELP_ZH: &str = r#"xp3brute 0.3.7
+跨平台的 KiriKiri XP3 提取、恢复、转换和重建工具。
+
+用法
+  xp3brute <命令> [参数] [选项]
+  xp3brute --help [--lang en|zh]
+  xp3brute completions <SHELL>
+
+归档工作流
+  unpack <归档> <输出目录>        恢复并解包 XP3 归档。
+  inspect <归档>                  检查索引、保护状态和条目元数据。
+  extract-raw <归档> <输出目录>  重建原始 XP3 数据段，不应用过滤器。
+  pack|pack-xp3 <目录> <归档>     从解包目录重建 XP3 归档。
+  rebuild-assets|encode-assets    重建解包目录中的转换后资源。
+  verify-roundtrip <目录>         验证解包目录能否重新打包。
+
+资源转换
+  decode-pbd <输入> [输出]         将 PBD 解码为 JSON。
+  encode-pbd|pack-pbd <JSON> <输出> 将 JSON 编码为 PBD。
+  decode-tlg <输入> <输出>         将 TLG 解码为 PNG/JPEG/BMP。
+  encode-tlg|pack-tlg <图片> <输出> 将 PNG/JPEG/BMP 编码为 TLG。
+  encode-amv|pack-amv <帧目录> <输出> 将图片帧编码为 AMV。
+
+恢复与诊断
+  devices                         列出 CPU/GPU 后端。
+  filter-probe <目标>              检测并分析 XP3 内容过滤器。
+  filter-apply <模块> <输入> <输出> 对一个原始条目应用过滤器。
+  exe-analyze <game.exe>          检查可执行文件的启动数据。
+  pe-unpack|pe-normalize <输入> <输出> 规范化压缩的 PE 可执行文件。
+  probe <归档>                    对归档级恢复假设排序。
+  shared-probe <归档>             探测共享重复 XOR 候选。
+  xor-recover <文件>              根据已知明文恢复重复 XOR 数据流。
+
+特殊索引恢复
+  scan-special <归档>             扫描历史 Special 索引。
+  decode-special <归档> <输出>    将 Special 索引解码到文件。
+  dump-special <归档> <输出>      导出原始 Special 索引。
+  hx-index <归档>                 检查经过认证的 Hxv4 索引。
+
+帮助与补全
+  help [--lang en|zh]              显示帮助文本。
+  completions <bash|zsh|fish|powershell|elvish>
+                                   输出 shell 补全脚本。
+
+通用选项
+  -h, --help                      显示英文帮助。
+      --help-zh                   显示中文帮助。
+      --lang <en|zh>              选择帮助语言。
+      --verbose                   输出详细恢复证据。
+      --no-progress               禁用进度输出。
+
+解包选项
+      --compute <auto|cpu|gpu|hybrid>
+                                   选择恢复后端。
+      --max-period <N>            普通 XOR 最大周期。
+      --top-periods <N>           保留的普通候选数量。
+      --special-max-period <N>    Special 索引 XOR 最大周期（1..4096）。
+      --special-xor-key <HEX>     直接提供 Special 索引密钥流。
+      --special-xor-scope <prefix|whole>
+                                   将给定密钥应用于前缀或整个数据。
+      --exe <路径>                显式指定游戏可执行文件。
+      --filter-exe <路径>         指定内容过滤器模块或游戏目录。
+      --no-exe-auto               禁用可执行文件自动搜索。
+      --hx-key <HEX64>            Hxv4 索引密钥（必须同时提供 --hx-nonce）。
+      --hx-nonce <HEX48>          Hxv4 随机数（必须同时提供 --hx-key）。
+      --hx-names <文件>           加载 Hxv4 文件名映射。
+      --name-dict <文件>          添加 Hxv4 候选文件名。
+      --hx-game-dir <目录>        在指定游戏目录中搜索 Hxv4 文件名。
+      --no-hx-name-bootstrap      禁用 Hxv4 文件名自动引导。
+      --unpacker-all              启用所有无损资源转换。
+      --tjs <emit|decompile|none> TJS2 输出模式。
+      --tlg <png|jpg|bmp|none>    TLG 输出模式。
+      --psb <all|json|png|jpg|bmp|none>
+                                   PSB 输出模式。
+      --pbd <json|none>           PBD 输出模式。
+      --amv <png|none>            AMV 输出模式。
+
+说明
+  普通解包会保留原始文件字节。--unpacker-all 会启用 TJS2、TLG、PSB、PBD
+  和 AMV 的派生输出。Hxv4 归档只有在认证解密和文件名恢复成功后才会打开。
+  对于不支持的原生过滤器，工具会保留为未恢复状态，不会伪造明文。
+
+补全示例
+  xp3brute completions bash > ~/.local/share/bash-completion/completions/xp3brute
+  xp3brute completions zsh  > ~/.zfunc/_xp3brute
+  xp3brute completions fish > ~/.config/fish/completions/xp3brute.fish
+  xp3brute completions powershell > xp3brute.ps1"#;
+
+fn print_completions(shell: &str) -> Result<(), io::Error> {
+    let script = match shell.to_ascii_lowercase().as_str() {
+        "bash" => BASH_COMPLETION,
+        "zsh" => ZSH_COMPLETION,
+        "fish" => FISH_COMPLETION,
+        "powershell" | "pwsh" => POWERSHELL_COMPLETION,
+        "elvish" => ELVISH_COMPLETION,
+        _ => {
+            return Err(cli_error(format!(
+                "unsupported shell {shell:?}; choose bash, zsh, fish, powershell, or elvish"
+            )))
+        }
+    };
+    print!("{script}");
+    io::stdout().flush()
+}
+
+const BASH_COMPLETION: &str = r#"# bash completion for xp3brute
+_xp3brute()
+{
+    local cur prev command options
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    command="${COMP_WORDS[1]}"
+
+    if (( COMP_CWORD == 1 )); then
+        COMPREPLY=( $(compgen -W "completion completions decode-pbd decode-tlg devices dump-special encode-amv encode-assets encode-pbd encode-tlg exe-analyze extract-raw filter-apply filter-probe help hx-index inspect pack pack-amv pack-pbd pack-tlg pack-xp3 pe-normalize pe-unpack probe rebuild-assets scan-special shared-probe unpack verify-roundtrip xor-recover" -- "$cur") )
+        return 0
+    fi
+
+    case "$command:$prev" in
+        completion:*|completions:*)
+            COMPREPLY=( $(compgen -W "bash zsh fish powershell elvish" -- "$cur") )
+            return 0
+            ;;
+        *:--compute)
+            COMPREPLY=( $(compgen -W "auto cpu gpu hybrid" -- "$cur") )
+            return 0
+            ;;
+        *:--special-xor-scope)
+            COMPREPLY=( $(compgen -W "prefix whole" -- "$cur") )
+            return 0
+            ;;
+        *:--tjs)
+            COMPREPLY=( $(compgen -W "emit decompile none" -- "$cur") )
+            return 0
+            ;;
+        *:--tlg)
+            COMPREPLY=( $(compgen -W "png jpg bmp none" -- "$cur") )
+            return 0
+            ;;
+        *:--psb)
+            COMPREPLY=( $(compgen -W "all json png jpg bmp none" -- "$cur") )
+            return 0
+            ;;
+        *:--pbd)
+            COMPREPLY=( $(compgen -W "json none" -- "$cur") )
+            return 0
+            ;;
+        *:--amv)
+            COMPREPLY=( $(compgen -W "png none" -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    options="--allow-lossy --amv --archive --compact-layout --compute --components --crib --dump-bootstrap --dump-startup --dynamic-v2link --exe --filter-exe --fps --help --help-zh --hx-game-dir --hx-key --hx-names --hx-nonce --jpeg-quality --json --lang --max-period --min-period --name-dict --no-exe-auto --no-hx-name-bootstrap --no-progress --no-rebuild-assets --offset --out-dir --output --pbd --psb --quality --rebuilt-dir --show-tags --source-archive --special-max-period --special-xor-key --special-xor-scope --static-only --tjs --tlg --top --top-periods --trace-code --unpacker-all --verbose"
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$options" -- "$cur") )
+    else
+        COMPREPLY=( $(compgen -f -- "$cur") )
+    fi
+    return 0
+}
+complete -F _xp3brute xp3brute
+"#;
+
+const ZSH_COMPLETION: &str = r#"#compdef xp3brute
+_xp3brute() {
+    local -a commands options values
+    commands=(
+        'completion:print shell completion script'
+        'completions:print shell completion script'
+        'decode-pbd:decode PBD to JSON'
+        'decode-tlg:decode TLG to an image'
+        'devices:list compute backends'
+        'dump-special:dump a Special index'
+        'encode-amv:encode image frames as AMV'
+        'encode-assets:rebuild converted assets'
+        'encode-pbd:encode JSON as PBD'
+        'encode-tlg:encode an image as TLG'
+        'exe-analyze:inspect executable bootstrap data'
+        'extract-raw:extract raw XP3 segments'
+        'filter-apply:apply a content filter'
+        'filter-probe:probe a content filter'
+        'help:show help'
+        'hx-index:inspect an Hxv4 index'
+        'inspect:inspect an XP3 archive'
+        'pack:rebuild an XP3 archive'
+        'pack-xp3:rebuild an XP3 archive'
+        'pack-amv:encode image frames as AMV'
+        'pack-pbd:encode JSON as PBD'
+        'pack-tlg:encode an image as TLG'
+        'pe-normalize:normalize a packed PE'
+        'pe-unpack:normalize a packed PE'
+        'probe:rank recovery hypotheses'
+        'rebuild-assets:rebuild converted assets'
+        'scan-special:scan a Special index'
+        'shared-probe:probe shared XOR candidates'
+        'unpack:recover and extract an XP3 archive'
+        'verify-roundtrip:verify a repack round trip'
+        'xor-recover:recover a repeating-XOR stream'
+    )
+    options=(--allow-lossy --amv --archive --compact-layout --compute --components --crib
+        --dump-bootstrap --dump-startup --dynamic-v2link --exe --filter-exe --fps --help
+        --help-zh --hx-game-dir --hx-key --hx-names --hx-nonce --jpeg-quality --json --lang
+        --max-period --min-period --name-dict --no-exe-auto --no-hx-name-bootstrap --no-progress
+        --no-rebuild-assets --offset --out-dir --output --pbd --psb --quality --rebuilt-dir
+        --show-tags --source-archive --special-max-period --special-xor-key --special-xor-scope
+        --static-only --tjs --tlg --top --top-periods --trace-code --unpacker-all --verbose)
+
+    if (( CURRENT == 2 )); then
+        _describe 'command' commands
+        return
+    fi
+    if [[ $words[2] == completion || $words[2] == completions ]] && (( CURRENT == 3 )); then
+        compadd -- bash zsh fish powershell elvish
+        return
+    fi
+    if [[ ${words[CURRENT]} == -* ]]; then
+        compadd -- $options
+    else
+        _files
+    fi
+}
+_xp3brute "$@"
+"#;
+
+const FISH_COMPLETION: &str = r#"# fish completion for xp3brute
+set -l xp3_commands completion completions decode-pbd decode-tlg devices dump-special encode-amv encode-assets encode-pbd encode-tlg exe-analyze extract-raw filter-apply filter-probe help hx-index inspect pack pack-amv pack-pbd pack-tlg pack-xp3 pe-normalize pe-unpack probe rebuild-assets scan-special shared-probe unpack verify-roundtrip xor-recover
+complete -c xp3brute -f -n '__fish_use_subcommand' -a "$xp3_commands"
+complete -c xp3brute -f -n '__fish_seen_subcommand_from completion completions' -a 'bash zsh fish powershell elvish'
+complete -c xp3brute -l help -s h -d 'show English help'
+complete -c xp3brute -l help-zh -d 'show Chinese help'
+complete -c xp3brute -l lang -r -a 'en zh' -d 'help language'
+complete -c xp3brute -l verbose -d 'show detailed recovery evidence'
+complete -c xp3brute -l no-progress -d 'disable progress output'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l compute -r -a 'auto cpu gpu hybrid'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack probe' -l max-period -r
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l top-periods -r
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-max-period -r
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-xor-key -r
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-xor-scope -r -a 'prefix whole'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect decode-special hx-index' -l exe -r -F
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l filter-exe -r -F
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l tjs -r -a 'emit decompile none'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l tlg -r -a 'png jpg bmp none'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l psb -r -a 'all json png jpg bmp none'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l pbd -r -a 'json none'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l amv -r -a 'png none'
+complete -c xp3brute -n '__fish_seen_subcommand_from encode-amv pack-amv' -l fps -r
+complete -c xp3brute -n '__fish_seen_subcommand_from encode-amv pack-amv' -l quality -r
+complete -c xp3brute -n '__fish_seen_subcommand_from encode-tlg pack-tlg' -l components -r -a '1 3 4'
+complete -c xp3brute -n '__fish_seen_subcommand_from encode-tlg pack-tlg' -l allow-lossy
+"#;
+
+const POWERSHELL_COMPLETION: &str = r#"Register-ArgumentCompleter -Native -CommandName xp3brute -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = @('completion','completions','decode-pbd','decode-tlg','devices','dump-special','encode-amv','encode-assets','encode-pbd','encode-tlg','exe-analyze','extract-raw','filter-apply','filter-probe','help','hx-index','inspect','pack','pack-amv','pack-pbd','pack-tlg','pack-xp3','pe-normalize','pe-unpack','probe','rebuild-assets','scan-special','shared-probe','unpack','verify-roundtrip','xor-recover')
+    $options = @('--allow-lossy','--amv','--archive','--compact-layout','--compute','--components','--crib','--dump-bootstrap','--dump-startup','--dynamic-v2link','--exe','--filter-exe','--fps','--help','--help-zh','--hx-game-dir','--hx-key','--hx-names','--hx-nonce','--jpeg-quality','--json','--lang','--max-period','--min-period','--name-dict','--no-exe-auto','--no-hx-name-bootstrap','--no-progress','--no-rebuild-assets','--offset','--out-dir','--output','--pbd','--psb','--quality','--rebuilt-dir','--show-tags','--source-archive','--special-max-period','--special-xor-key','--special-xor-scope','--static-only','--tjs','--tlg','--top','--top-periods','--trace-code','--unpacker-all','--verbose')
+    $elements = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
+    $candidates = if ($elements.Count -le 1) { $commands } elseif ($elements.Count -eq 2 -and $elements[1] -in @('completion','completions')) { @('bash','zsh','fish','powershell','elvish') } else { $options }
+    $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+"#;
+
+const ELVISH_COMPLETION: &str = r#"# elvish completion for xp3brute
+set edit:completion:arg-completer[xp3brute] = {|@words|
+    var commands = [completion completions decode-pbd decode-tlg devices dump-special encode-amv encode-assets encode-pbd encode-tlg exe-analyze extract-raw filter-apply filter-probe help hx-index inspect pack pack-amv pack-pbd pack-tlg pack-xp3 pe-normalize pe-unpack probe rebuild-assets scan-special shared-probe unpack verify-roundtrip xor-recover]
+    if (== (count $words) 1) {
+        put $@commands
+    } elif (and (== (count $words) 2) (or (== $words[1] completion) (== $words[1] completions))) {
+        put bash zsh fish powershell elvish
+    }
+}
+"#;
+
 #[cfg(test)]
 mod cli_routing_tests {
     use super::*;
+
+    #[test]
+    fn help_language_parsing_supports_explicit_aliases() {
+        assert_eq!(parse_help_language(&[]).unwrap(), HelpLanguage::English);
+        assert_eq!(
+            parse_help_language(&["--lang".into(), "zh-CN".into()]).unwrap(),
+            HelpLanguage::Chinese
+        );
+        assert_eq!(
+            parse_help_language(&["--chinese".into()]).unwrap(),
+            HelpLanguage::Chinese
+        );
+        assert!(parse_help_language(&["--lang".into(), "fr".into()]).is_err());
+    }
+
+    #[test]
+    fn completion_scripts_have_shell_registration_hooks() {
+        assert!(BASH_COMPLETION.contains("complete -F _xp3brute xp3brute"));
+        assert!(ZSH_COMPLETION.contains("#compdef xp3brute"));
+        assert!(FISH_COMPLETION.contains("complete -c xp3brute"));
+        assert!(POWERSHELL_COMPLETION.contains("Register-ArgumentCompleter"));
+        assert!(ELVISH_COMPLETION.contains("edit:completion:arg-completer[xp3brute]"));
+    }
 
     #[test]
     fn unpack_image_conversion_defaults_to_none_and_accepts_expected_formats() {

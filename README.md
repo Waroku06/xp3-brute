@@ -103,7 +103,10 @@ cargo build --release
 ```
 
 To use the package from a separate NixOS system flake, add this repository as
-an input and include the package in `environment.systemPackages`:
+an input, import its NixOS module, and enable the program. The module installs
+the CLI and registers the Bash, Zsh, and Fish completion files automatically;
+PowerShell and Elvish completion files are also installed under the package's
+`share/xp3brute/completions` directory.
 
 ```nix
 {
@@ -115,11 +118,12 @@ an input and include the package in `environment.systemPackages`:
     in {
       nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [{
-          environment.systemPackages = [
-            xp3-brute.packages.${system}.default
-          ];
-        }];
+        modules = [
+          xp3-brute.nixosModules.default
+          ({ ... }: {
+            programs.xp3brute.enable = true;
+          })
+        ];
       };
     };
 }
@@ -134,6 +138,28 @@ sudo nixos-rebuild switch --flake .#<hostname>
 If flakes are not enabled yet, add
 `nix.settings.experimental-features = [ "nix-command" "flakes" ];` to the
 NixOS configuration first.
+
+### Shell completion and help languages
+
+When `xp3-brute.nixosModules.default` is enabled, the NixOS module installs
+the standard Bash, Zsh, and Fish completion paths automatically. The
+PowerShell and Elvish scripts are installed in the package's
+`share/xp3brute/completions` directory.
+
+For a standalone binary or a non-NixOS installation, generate a completion
+script for the shell you use and load it according to that shell's usual
+configuration:
+
+```bash
+xp3brute completions bash > ~/.local/share/bash-completion/completions/xp3brute
+xp3brute completions zsh > ~/.zfunc/_xp3brute
+xp3brute completions fish > ~/.config/fish/completions/xp3brute.fish
+xp3brute completions powershell > xp3brute.ps1
+```
+
+The command also accepts `elvish`. Use `xp3brute --help` for the English help
+page, or `xp3brute --help-zh` / `xp3brute --help --lang zh` for the Chinese
+version.
 
 ### Python / CPython bindings
 
