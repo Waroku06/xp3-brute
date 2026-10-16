@@ -11381,24 +11381,58 @@ const FISH_COMPLETION: &str = r#"# fish completion for xp3brute
 set -l xp3_commands completion completions decode-pbd decode-tlg devices dump-special encode-amv encode-assets encode-pbd encode-tlg exe-analyze extract-raw filter-apply filter-probe help hx-index inspect pack pack-amv pack-pbd pack-tlg pack-xp3 pe-normalize pe-unpack probe rebuild-assets scan-special shared-probe unpack verify-roundtrip xor-recover
 complete -c xp3brute -f -n '__fish_use_subcommand' -a "$xp3_commands"
 complete -c xp3brute -f -n '__fish_seen_subcommand_from completion completions' -a 'bash zsh fish powershell elvish'
-complete -c xp3brute -l help -s h -d 'show English help'
-complete -c xp3brute -l help-zh -d 'show Chinese help'
-complete -c xp3brute -l lang -r -a 'en zh' -d 'help language'
-complete -c xp3brute -l verbose -d 'show detailed recovery evidence'
-complete -c xp3brute -l no-progress -d 'disable progress output'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l compute -r -a 'auto cpu gpu hybrid'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack probe' -l max-period -r
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l top-periods -r
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-max-period -r
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-xor-key -r
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect scan-special decode-special' -l special-xor-scope -r -a 'prefix whole'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack inspect decode-special hx-index' -l exe -r -F
+complete -c xp3brute -f -n '__fish_use_subcommand' -s h -l help -d 'show English help'
+complete -c xp3brute -f -n '__fish_use_subcommand' -l help-zh -d 'show Chinese help'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from help' -l lang -r -a 'en zh' -d 'help language'
+
+# Options accepted by unpack. Keep these conditional so they do not appear for
+# unrelated subcommands or get mistaken for global options.
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-key -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-key1 -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-index-key1 -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-nonce -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-key2 -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l hx-index-key2 -r
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l exe -r -F
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l hx-exe -r -F
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l no-exe-auto
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l no-hx-exe-auto
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l no-hx-static
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l hx-names -r -F
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l name-dict -r -F
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l hx-game-dir -r -F
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l no-hx-name-bootstrap
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l special-xor-key -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l special-xor-scope -r -a 'prefix whole'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l special-max-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l max-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l top-periods -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l exhaustive-dynamic
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l compute -r -a 'auto cpu gpu hybrid'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l unpacker-all
 complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l filter-exe -r -F
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l tjs -r -a 'emit decompile none'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l tlg -r -a 'png jpg bmp none'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l psb -r -a 'all json png jpg bmp none'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l pbd -r -a 'json none'
-complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l amv -r -a 'png none'
+complete -c xp3brute -n '__fish_seen_subcommand_from unpack' -l filter-pe -r -F
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l tjs -r -a 'emit decompile none'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l tlg -r -a 'png jpg bmp none'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l psb -r -a 'all json png jpg bmp none'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l pbd -r -a 'json none'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l amv -r -a 'png none'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l no-progress -d 'disable progress output'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from unpack' -l verbose -d 'show detailed recovery evidence'
+
+# The same progress/recovery switches are valid for their respective commands.
+complete -c xp3brute -f -n '__fish_seen_subcommand_from shared-probe' -l max-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from shared-probe' -l top -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from shared-probe' -l no-progress -d 'disable progress output'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from probe' -l max-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from probe' -l top -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from probe' -l exhaustive-dynamic
+complete -c xp3brute -f -n '__fish_seen_subcommand_from probe' -l compute -r -a 'auto cpu gpu hybrid'
+complete -c xp3brute -f -n '__fish_seen_subcommand_from xor-recover' -l min-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from xor-recover' -l max-period -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from xor-recover' -l top -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from xor-recover' -l crib -r
+complete -c xp3brute -f -n '__fish_seen_subcommand_from pack' -l verbose -d 'show detailed recovery evidence'
 complete -c xp3brute -n '__fish_seen_subcommand_from encode-amv pack-amv' -l fps -r
 complete -c xp3brute -n '__fish_seen_subcommand_from encode-amv pack-amv' -l quality -r
 complete -c xp3brute -n '__fish_seen_subcommand_from encode-tlg pack-tlg' -l components -r -a '1 3 4'
@@ -11453,6 +11487,63 @@ mod cli_routing_tests {
         assert!(FISH_COMPLETION.contains("complete -c xp3brute"));
         assert!(POWERSHELL_COMPLETION.contains("Register-ArgumentCompleter"));
         assert!(ELVISH_COMPLETION.contains("edit:completion:arg-completer[xp3brute]"));
+    }
+
+    #[test]
+    fn fish_completion_scopes_help_and_lists_unpack_options() {
+        assert!(FISH_COMPLETION.contains(
+            "complete -c xp3brute -f -n '__fish_use_subcommand' -s h -l help"
+        ));
+        assert!(FISH_COMPLETION.contains(
+            "complete -c xp3brute -f -n '__fish_use_subcommand' -l help-zh"
+        ));
+        assert!(FISH_COMPLETION.contains(
+            "complete -c xp3brute -f -n '__fish_seen_subcommand_from help' -l lang"
+        ));
+        for option in [
+            "--hx-key",
+            "--hx-nonce",
+            "--exe",
+            "--no-exe-auto",
+            "--no-hx-exe-auto",
+            "--no-hx-static",
+            "--hx-names",
+            "--name-dict",
+            "--hx-game-dir",
+            "--no-hx-name-bootstrap",
+            "--special-xor-key",
+            "--special-xor-scope",
+            "--special-max-period",
+            "--max-period",
+            "--top-periods",
+            "--exhaustive-dynamic",
+            "--compute",
+            "--unpacker-all",
+            "--filter-exe",
+            "--filter-pe",
+            "--tjs",
+            "--tlg",
+            "--psb",
+            "--pbd",
+            "--amv",
+            "--no-progress",
+            "--verbose",
+        ] {
+            let fish_option = option.trim_start_matches('-');
+            assert!(
+                FISH_COMPLETION.contains(&format!("-l {fish_option}")),
+                "Fish completion is missing unpack option {option}"
+            );
+        }
+        assert!(!FISH_COMPLETION.contains(
+            "complete -c xp3brute -l help -s h -d 'show English help'"
+        ));
+        assert!(!FISH_COMPLETION.contains(
+            "complete -c xp3brute -l help-zh -d 'show Chinese help'"
+        ));
+        assert!(!FISH_COMPLETION.contains(
+            "complete -c xp3brute -l lang -r -a 'en zh' -d 'help language'"
+        ));
     }
 
     #[test]
