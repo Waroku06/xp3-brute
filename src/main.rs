@@ -6513,7 +6513,7 @@ fn require_special_before_content_recovery(
         }
         if !hxv4_special_decoded {
             return Err(cli_error(format!(
-                "HXV4 Special index is locked: no authenticated/parsed XChaCha20-Poly1305 result is available (descriptor selects nonce_slot={hxv4_nonce_slot}); refusing to reconstruct or solve entries before Special recovery"
+                "HXV4 Special index is locked: no authenticated/parsed XChaCha20-Poly1305 result is available (descriptor selects nonce_slot={hxv4_nonce_slot}); refusing to reconstruct or solve entries before Special recovery. Supply --exe PATH or --hx-key/--hx-nonce."
             )));
         }
         return Ok(());
@@ -6521,7 +6521,7 @@ fn require_special_before_content_recovery(
 
     if has_special && !ordinary_special_decoded {
         return Err(cli_error(
-            "Special-index descriptor was found, but no decoder/key candidate passed strict validation; refusing to continue with data-side recovery before Special recovery",
+            "Special-index descriptor was found, but no decoder/key candidate passed strict validation; refusing to continue with data-side recovery before Special recovery. If this archive uses a game-specific decoder, retry with --exe PATH or provide --special-xor-key.",
         ));
     }
 
@@ -8096,14 +8096,28 @@ fn automatic_cxdec_scan_target(
     archive: &Archive,
     explicit_filter_target: Option<&Path>,
     hx_options: &HxCliOptions,
+    ordered_names: Option<&OrderedNameRecovery>,
 ) -> Result<Option<PathBuf>, LibraryError> {
     if let Some(target) = explicit_filter_target {
         return Ok(Some(target.to_path_buf()));
     }
-    if let Some(explicit) = hx_options.explicit_exe() {
+    let explicit_exe = hx_options.explicit_exe();
+    if let Some(explicit) = explicit_exe {
         return Ok(Some(explicit));
     }
     if !hx_options.exe_auto_enabled() {
+        return Ok(None);
+    }
+
+    // Executable discovery is an optional fallback.  First establish that at
+    // least one real entry still needs a content transform; plain archives
+    // should finish through their archive-side validation without touching the
+    // game directory or asking for an EXE.
+    let (sample_indices, _) = content_filter_validation_samples(archive, ordered_names)?;
+    if sample_indices.is_empty() {
+        eprintln!(
+            "[content-filter] automatic executable discovery skipped reason=no-encrypted-samples"
+        );
         return Ok(None);
     }
     let Some(archive_path) = archive.path.as_deref() else {
@@ -8112,6 +8126,35 @@ fn automatic_cxdec_scan_target(
     let candidates = discover_game_executables(archive_path, None)
         .map_err(LibraryError::InvalidArgument)?;
     Ok(candidates.into_iter().next())
+}
+
+fn report_optional_exe_hint(
+    archive: &Archive,
+    unresolved: usize,
+    hx_options: &HxCliOptions,
+    x86_filter_module: Option<&Path>,
+    cxdec_scan_target: Option<&Path>,
+) {
+    if unresolved == 0 || archive.is_hxv4() {
+        return;
+    }
+
+    let requested_target = hx_options
+        .explicit_exe()
+        .or_else(|| cxdec_scan_target.map(Path::to_path_buf))
+        .or_else(|| x86_filter_module.map(Path::to_path_buf));
+    if let Some(target) = requested_target {
+        eprintln!(
+            "[content-filter] unresolved={} entries remain; supplied target {} did not produce a validated XP3 filter. Check the executable/module path or try --filter-probe on the game files.",
+            unresolved,
+            target.display(),
+        );
+    } else {
+        eprintln!(
+            "[content-filter] unresolved={} entries remain after archive-only recovery. If these entries use a game-specific XP3 filter, retry with --exe PATH (or --filter-exe PATH); an executable is otherwise optional.",
+            unresolved,
+        );
+    }
 }
 
 fn unpack(
@@ -8597,12 +8640,13 @@ fn unpack(
     let mut x86_filter_module_sha: Option<String> = None;
 
     // A fixed format-backed XOR key is both cheaper and more reliable than
-    // scanning every sibling PE for a callback.  Only use this automatic path
-    // when the caller did not provide an explicit executable/filter target;
-    // explicit targets retain their requested native-filter precedence.
-    let explicit_filter_target = cxdec_scan_target.is_some()
-        || x86_filter_module.is_some()
-        || hx_options.explicit_exe().is_some();
+    // scanning every sibling PE for a callback.  It is also authoritative
+    // when it validates all sampled entries, so an optional `--exe` must not
+    // force a slower native path or make an otherwise unpackable archive fail.
+    // Explicit filter targets remain authoritative. A game executable is a
+    // discovery hint, so it must not prevent a validated archive-wide key
+    // from taking the cheaper and more reliable path.
+    let explicit_filter_target = cxdec_scan_target.is_some() || x86_filter_module.is_some();
     if global_key.is_none() && !archive.is_hxv4() && !explicit_filter_target {
         if let Some(candidate) =
             find_format_backed_global_key(archive, ordered_names.as_ref())?
@@ -8619,6 +8663,7 @@ fn unpack(
             archive,
             cxdec_scan_target,
             hx_options,
+            ordered_names.as_ref(),
         )?;
         if let Some(target) = scan_target.as_deref() {
             recovered_fixed_cxdec_engine =
@@ -9952,6 +9997,13 @@ fn unpack(
     // `out_dir` is an extraction tree, not a diagnostic workspace.  The
     // in-memory report is intentionally dropped after console diagnostics.
     drop(report);
+    report_optional_exe_hint(
+        archive,
+        unresolved,
+        hx_options,
+        x86_filter_module,
+        cxdec_scan_target,
+    );
     println!(
         "summary total={} solved={} unresolved={} ignored={} reconstruct_failed={}",
         archive.entries.len(),
@@ -11123,7 +11175,7 @@ UNPACK OPTIONS
       --special-xor-key <HEX>      Supply a Special-index keystream directly.
       --special-xor-scope <prefix|whole>
                                    Apply the supplied key to a prefix or whole blob.
-      --exe <PATH>                 Select the game executable explicitly.
+      --exe <PATH>                 Optional executable for title-specific recovery.
       --filter-exe <PATH>          Select a content-filter module or game directory.
       --no-exe-auto                Disable executable discovery.
       --hx-key <HEX64>             Hxv4 index key (requires --hx-nonce).
@@ -11212,7 +11264,7 @@ const HELP_ZH: &str = r#"xp3brute 0.3.7
       --special-xor-key <HEX>     直接提供 Special 索引密钥流。
       --special-xor-scope <prefix|whole>
                                    将给定密钥应用于前缀或整个数据。
-      --exe <路径>                显式指定游戏可执行文件。
+      --exe <路径>                需要标题专用恢复逻辑时使用的可选可执行文件。
       --filter-exe <路径>         指定内容过滤器模块或游戏目录。
       --no-exe-auto               禁用可执行文件自动搜索。
       --hx-key <HEX64>            Hxv4 索引密钥（必须同时提供 --hx-nonce）。
@@ -11633,7 +11685,9 @@ mod cli_routing_tests {
     fn ordinary_special_is_a_hard_gate_when_decode_fails() {
         let err = require_special_before_content_recovery(false, true, false, false, 0)
             .expect_err("undecoded Special must block entry recovery");
-        assert!(err.to_string().contains("refusing to continue"));
+        let message = err.to_string();
+        assert!(message.contains("refusing to continue"));
+        assert!(message.contains("--exe PATH"));
     }
 
     #[test]
@@ -11649,6 +11703,7 @@ mod cli_routing_tests {
         let message = err.to_string();
         assert!(message.contains("nonce_slot=1"));
         assert!(message.contains("refusing to reconstruct or solve entries"));
+        assert!(message.contains("--exe PATH"));
 
         require_special_before_content_recovery(true, true, false, true, 1)
             .expect("authenticated and parsed HXV4 Special opens the gate");

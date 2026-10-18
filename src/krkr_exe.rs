@@ -530,9 +530,20 @@ pub fn discover_game_executables(
         return Ok(vec![path.to_path_buf()]);
     }
 
-    let archive_dir = archive_path.parent().unwrap_or_else(|| Path::new("."));
+    // `Path::parent()` returns an empty path for a bare filename such as
+    // `patch3.xp3`.  Passing that empty path to `read_dir` produces
+    // `cannot scan  ...`, even though the archive was opened successfully
+    // from the current directory.  Normalize it before looking for optional
+    // helper executables.
+    let archive_dir = archive_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut dirs = vec![archive_dir.to_path_buf()];
-    if let Some(parent) = archive_dir.parent() {
+    if let Some(parent) = archive_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
         if parent != archive_dir {
             dirs.push(parent.to_path_buf());
         }
@@ -543,10 +554,14 @@ pub fn discover_game_executables(
         let entries = match fs::read_dir(&dir) {
             Ok(v) => v,
             Err(_) if dir != archive_dir => continue,
-            Err(e) => return Err(format!("cannot scan {} for game executable: {e}", dir.display())),
+            // Automatic executable discovery is optional.  If the archive's
+            // directory cannot be scanned, let the caller continue with
+            // archive-only recovery and report a missing executable only if
+            // that recovery later proves necessary.
+            Err(_) => continue,
         };
-        for entry in entries {
-            let path = entry.map_err(|e| e.to_string())?.path();
+        for entry in entries.flatten() {
+            let path = entry.path();
             if crate::magic_sniff::path_looks_like_pe32_executable(&path) {
                 unique.insert(path);
             }
@@ -1249,6 +1264,15 @@ mod tests {
         let mut bytes = vec![0u8; 256];
         bytes[32..34].copy_from_slice(b"MZ");
         assert!(scan_pe_candidates(&bytes).is_empty());
+    }
+
+    #[test]
+    fn automatic_executable_discovery_skips_missing_archive_directory() {
+        let result = discover_game_executables(
+            Path::new("directory-that-does-not-exist/archive.xp3"),
+            None,
+        );
+        assert!(result.is_ok());
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {

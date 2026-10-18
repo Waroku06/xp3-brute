@@ -209,13 +209,15 @@ continue to use the same frontend-neutral public API directly.
 xp3brute unpack data.xp3 out
 ```
 
-If the game executable is not beside the XP3 archive, specify it explicitly:
+Most archives can be unpacked without a game executable:
+
+The tool first validates archive-side keys and plaintext formats. It only searches for a nearby executable when encrypted entries still need a title-specific extraction filter. If that fallback is needed, the command reports it and you can provide the executable explicitly:
 
 ```bash
 xp3brute unpack data.xp3 out --exe game.exe
 ```
 
-`--exe` may point to the game executable. The tool can also inspect nearby DLL/TPM modules when looking for an extraction filter.
+`--exe` is optional and may point to the game executable. The tool can also inspect nearby DLL/TPM modules when looking for an extraction filter. Supplying an executable does not override an archive-wide key that has already been validated.
 
 ### What happens automatically
 
@@ -226,17 +228,18 @@ flowchart TD
     C -- Yes --> D[Identify protection family]
     D --> E[Recover and validate names / protection state]
     C -- No --> F[Continue normally]
-    E --> G[Recover content filter]
+    E --> G[Recover content with archive-side evidence]
     F --> G
-    G --> H{Known filter family?}
-    H -- Yes --> I[Use recovered implementation/state]
-    H -- No --> J[Search EXE / DLL / TPM for XP3 filter]
-    J --> K{Filter callback validated?}
-    K -- Yes --> L[Execute filter in x86 emulator]
-    K -- No --> M[Shared-key recovery]
-    M --> N[Per-file brute-force fallback]
-    I --> O[Validate recovered files]
-    L --> O
+    G --> H{Encrypted entries still need a filter?}
+    H -- No --> O[Validate recovered files]
+    H -- Yes --> I{Known filter family?}
+    I -- Yes --> J[Use recovered implementation/state]
+    I -- No --> K[Search optional EXE / DLL / TPM]
+    K --> L{Filter callback validated?}
+    L -- Yes --> M[Execute filter in x86 emulator]
+    L -- No --> N[Shared-key and per-file fallback]
+    J --> O
+    M --> O
     N --> O
     O --> P[Write verified files]
 ```
